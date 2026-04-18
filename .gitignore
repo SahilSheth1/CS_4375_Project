@@ -28,3 +28,6 @@ Thumbs.db
 
 # Kaggle
 kaggle.json
+
+# VS Code
+.vscode/
