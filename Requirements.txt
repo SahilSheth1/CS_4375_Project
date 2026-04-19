@@ -3,3 +3,4 @@ datasets
 matplotlib
 torch
 torchvision
+pytesseract
