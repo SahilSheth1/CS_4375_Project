@@ -1,0 +1,4 @@
+experiment_id,description,model_type,patch_size,num_layers,num_heads,learning_rate,train_test_split,exact_match_vendor,exact_match_date,exact_match_address,exact_match_total,f1_vendor,f1_date,f1_address,f1_total,overall_f1,review_rate,notes
+Exp1,Tesseract OCR + regex field extraction,Tesseract+Regex,,,,,N/A (test set only),0.1297,0.7061,0.0115,0.2968,0.3319,0.708,0.5351,0.3007,0.4689,,SROIE 2019 test split
+Exp2,"ViT — patch=16, layers=4, heads=4",ViT,16,4,4,0.0001,80/10/10,,,,,,,,,,,
+Exp3,"ViT — patch=16, layers=6, heads=8",ViT,16,6,8,0.0001,80/10/10,,,,,,,,,,,
