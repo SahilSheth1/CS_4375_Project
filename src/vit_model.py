@@ -103,3 +103,143 @@ class PatchAndPositionEmbedding(nn.Module):
     @property
     def num_patches(self):
         return self.patch_embedding.num_patches
+
+
+# ---------------------------------------------------------------------------
+# MultiHeadSelfAttention
+# ---------------------------------------------------------------------------
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        assert embed_dim % num_heads == 0, (
+            f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+        )
+        self.num_heads = num_heads
+        self.head_dim  = embed_dim // num_heads
+        self.scale     = self.head_dim ** -0.5
+
+        self.qkv_proj     = nn.Linear(embed_dim, 3 * embed_dim, bias=True)
+        self.out_proj     = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.proj_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, D = x.shape
+
+        # Step 1 — project and reshape into heads
+        qkv = self.qkv_proj(x)                                    # (B, N, 3*D)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)                         # (3, B, h, N, d_k)
+        q, k, v = qkv.unbind(0)                                   # each (B, h, N, d_k)
+
+        # Step 2 — scaled dot-product attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale             # (B, h, N, N)
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_dropout(attn)
+
+        # Step 3 — weighted sum of values
+        x = attn @ v                                               # (B, h, N, d_k)
+
+        # Step 4 — concatenate heads and output projection
+        x = x.transpose(1, 2).reshape(B, N, D)                   # (B, N, D)
+        x = self.proj_dropout(self.out_proj(x))
+        return x
+
+    def extra_repr(self) -> str:
+        embed_dim = self.num_heads * self.head_dim
+        return f"num_heads={self.num_heads}, head_dim={self.head_dim}, embed_dim={embed_dim}"
+
+
+# ---------------------------------------------------------------------------
+# FeedForwardBlock
+# ---------------------------------------------------------------------------
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self, embed_dim: int, mlp_ratio: int = 4, dropout: float = 0.0):
+        super().__init__()
+        hidden_dim = embed_dim * mlp_ratio
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+    def extra_repr(self) -> str:
+        return (
+            f"embed_dim={self.net[-2].out_features}, "
+            f"hidden_dim={self.net[0].out_features}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TransformerEncoderLayer
+# ---------------------------------------------------------------------------
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        mlp_ratio: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn  = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn   = FeedForwardBlock(embed_dim, mlp_ratio, dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x))  # attention sub-layer  (pre-LN)
+        x = x + self.ffn(self.norm2(x))   # feed-forward sub-layer (pre-LN)
+        return x
+
+
+# ---------------------------------------------------------------------------
+# ViTEncoder
+# ---------------------------------------------------------------------------
+
+class ViTEncoder(nn.Module):
+    def __init__(
+        self,
+        image_size:  int   = 224,
+        patch_size:  int   = 16,
+        in_channels: int   = 3,
+        embed_dim:   int   = 256,
+        num_layers:  int   = 4,
+        num_heads:   int   = 4,
+        mlp_ratio:   int   = 4,
+        dropout:     float = 0.0,
+    ):
+        super().__init__()
+        self.embedding = PatchAndPositionEmbedding(
+            image_size, patch_size, in_channels, embed_dim
+        )
+        self.layers = nn.Sequential(*[
+            TransformerEncoderLayer(embed_dim, num_heads, mlp_ratio, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # store for extra_repr
+        self._num_layers = num_layers
+        self._num_heads  = num_heads
+        self._embed_dim  = embed_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.embedding(x)  # (B, N, D)
+        x = self.layers(x)     # (B, N, D)
+        x = self.norm(x)
+        return x               # (B, N, D)
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_layers={self._num_layers}, num_heads={self._num_heads}, "
+            f"embed_dim={self._embed_dim}, num_patches={self.embedding.num_patches}"
+        )
