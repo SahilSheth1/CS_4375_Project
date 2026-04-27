@@ -11,6 +11,7 @@ from torchvision import transforms
 BASE = "../sroie-receipt-dataset/SROIE2019"
 SPLITS = ["train", "test"]
 SEED = 42
+RESOLUTION = 384
 
 
 def build_dataframe(base_path=BASE):
@@ -50,20 +51,34 @@ def load_sroie_split(base_path=BASE):
 
     return df_train, df_val, df_test
 
-
 class SROIEDataset(Dataset):
-    TRANSFORM = transforms.Compose([
-        transforms.Resize((224, 224)),
+    VAL_TRANSFORM = transforms.Compose([
+        transforms.Resize((RESOLUTION, RESOLUTION)),
         transforms.Grayscale(num_output_channels=3),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     ])
 
-    def __init__(self, dataframe, base_path=BASE, transform=None):
+    TRAIN_TRANSFORM = transforms.Compose([
+        transforms.Resize((RESOLUTION, RESOLUTION)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.RandomRotation(degrees=3),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
+    ])
+
+    def __init__(self, dataframe, base_path=BASE, transform=None, is_train=False):
         self.df        = dataframe.reset_index(drop=True)
         self.base_path = base_path
-        self.transform = transform or self.TRANSFORM
+        if transform is not None:
+            self.transform = transform
+        elif is_train:
+            self.transform = self.TRAIN_TRANSFORM
+        else:
+            self.transform = self.VAL_TRANSFORM
 
     def __len__(self):
         return len(self.df)
@@ -92,11 +107,19 @@ def collate_fn(batch):
 def get_dataloaders(base_path=BASE, batch_size=16):
     df_train, df_val, df_test = load_sroie_split(base_path)
 
-    train_loader = DataLoader(SROIEDataset(df_train, base_path), batch_size=batch_size,
-                              shuffle=True,  num_workers=2, collate_fn=collate_fn)
-    val_loader   = DataLoader(SROIEDataset(df_val,   base_path), batch_size=batch_size,
-                              shuffle=False, num_workers=2, collate_fn=collate_fn)
-    test_loader  = DataLoader(SROIEDataset(df_test,  base_path), batch_size=batch_size,
-                              shuffle=False, num_workers=2, collate_fn=collate_fn)
-
+    train_loader = DataLoader(
+        SROIEDataset(df_train, base_path, is_train=True),
+        batch_size=batch_size, shuffle=True,
+        num_workers=2, collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        SROIEDataset(df_val, base_path, is_train=False),
+        batch_size=batch_size, shuffle=False,
+        num_workers=2, collate_fn=collate_fn
+    )
+    test_loader = DataLoader(
+        SROIEDataset(df_test, base_path, is_train=False),
+        batch_size=batch_size, shuffle=False,
+        num_workers=2, collate_fn=collate_fn
+    )
     return train_loader, val_loader, test_loader

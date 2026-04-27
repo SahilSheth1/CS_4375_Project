@@ -103,12 +103,7 @@ class PatchAndPositionEmbedding(nn.Module):
     @property
     def num_patches(self):
         return self.patch_embedding.num_patches
-
-
-# ---------------------------------------------------------------------------
-# MultiHeadSelfAttention
-# ---------------------------------------------------------------------------
-
+    
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
@@ -127,33 +122,24 @@ class MultiHeadSelfAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, D = x.shape
 
-        # Step 1 — project and reshape into heads
-        qkv = self.qkv_proj(x)                                    # (B, N, 3*D)
+        qkv = self.qkv_proj(x)                                    
         qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)                         # (3, B, h, N, d_k)
-        q, k, v = qkv.unbind(0)                                   # each (B, h, N, d_k)
+        qkv = qkv.permute(2, 0, 3, 1, 4)                         
+        q, k, v = qkv.unbind(0)                                  
 
-        # Step 2 — scaled dot-product attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale             # (B, h, N, N)
+        attn = (q @ k.transpose(-2, -1)) * self.scale            
         attn = attn.softmax(dim=-1)
         attn = self.attn_dropout(attn)
 
-        # Step 3 — weighted sum of values
-        x = attn @ v                                               # (B, h, N, d_k)
+        x = attn @ v                  
 
-        # Step 4 — concatenate heads and output projection
-        x = x.transpose(1, 2).reshape(B, N, D)                   # (B, N, D)
+        x = x.transpose(1, 2).reshape(B, N, D)
         x = self.proj_dropout(self.out_proj(x))
         return x
 
     def extra_repr(self) -> str:
         embed_dim = self.num_heads * self.head_dim
         return f"num_heads={self.num_heads}, head_dim={self.head_dim}, embed_dim={embed_dim}"
-
-
-# ---------------------------------------------------------------------------
-# FeedForwardBlock
-# ---------------------------------------------------------------------------
 
 class FeedForwardBlock(nn.Module):
     def __init__(self, embed_dim: int, mlp_ratio: int = 4, dropout: float = 0.0):
@@ -175,12 +161,7 @@ class FeedForwardBlock(nn.Module):
             f"embed_dim={self.net[-2].out_features}, "
             f"hidden_dim={self.net[0].out_features}"
         )
-
-
-# ---------------------------------------------------------------------------
-# TransformerEncoderLayer
-# ---------------------------------------------------------------------------
-
+        
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -196,14 +177,10 @@ class TransformerEncoderLayer(nn.Module):
         self.ffn   = FeedForwardBlock(embed_dim, mlp_ratio, dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x))  # attention sub-layer  (pre-LN)
-        x = x + self.ffn(self.norm2(x))   # feed-forward sub-layer (pre-LN)
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
         return x
 
-
-# ---------------------------------------------------------------------------
-# ViTEncoder
-# ---------------------------------------------------------------------------
 
 class ViTEncoder(nn.Module):
     def __init__(
@@ -233,13 +210,62 @@ class ViTEncoder(nn.Module):
         self._embed_dim  = embed_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.embedding(x)  # (B, N, D)
-        x = self.layers(x)     # (B, N, D)
+        x = self.embedding(x)
+        x = self.layers(x)
         x = self.norm(x)
-        return x               # (B, N, D)
+        return x
 
     def extra_repr(self) -> str:
         return (
             f"num_layers={self._num_layers}, num_heads={self._num_heads}, "
             f"embed_dim={self._embed_dim}, num_patches={self.embedding.num_patches}"
         )
+
+class ReceiptFieldHead(nn.Module):
+    def __init__(self, embed_dim: int, vocab_size: int, dropout: float = 0.1):
+        super().__init__()
+        self.pool = lambda x: x.mean(dim=1)
+        self.head = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim // 2, vocab_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pooled = self.pool(x)        # (B, D)
+        return self.head(pooled)     # (B, vocab_size)
+
+
+class ReceiptViT(nn.Module):
+    FIELDS = ["vendor", "date", "total", "address"]
+
+    def __init__(
+        self,
+        vocab_sizes:  dict,
+        image_size:   int   = 224,
+        patch_size:   int   = 16,
+        in_channels:  int   = 3,
+        embed_dim:    int   = 256,
+        num_layers:   int   = 4,
+        num_heads:    int   = 4,
+        mlp_ratio:    int   = 4,
+        dropout:      float = 0.1,
+    ):
+        super().__init__()
+        self.encoder = ViTEncoder(
+            image_size=image_size, patch_size=patch_size,
+            in_channels=in_channels, embed_dim=embed_dim,
+            num_layers=num_layers, num_heads=num_heads,
+            mlp_ratio=mlp_ratio, dropout=dropout,
+        )
+        self.heads = nn.ModuleDict({
+            field: ReceiptFieldHead(embed_dim, vocab_sizes[field], dropout)
+            for field in self.FIELDS
+        })
+
+    def forward(self, x: torch.Tensor) -> dict:
+        features = self.encoder(x)
+        return {field: self.heads[field](features) for field in self.FIELDS}
