@@ -122,6 +122,9 @@ def log_experiment(
             df[col] = ""
 
     # Build the new row from results_dict, cleaning values as we go.
+    # All values are coerced to strings to match the dtype=str read above —
+    # otherwise the df.loc assignment below fails on Arrow-backed string columns
+    # when a metric value comes through as a float.
     row: dict[str, Any] = {"experiment_id": str(experiment_id)}
     for col in df.columns:
         if col == "experiment_id":
@@ -131,11 +134,11 @@ def log_experiment(
             row[col] = ""
         elif col in _METRIC_COLS and val != "":
             try:
-                row[col] = round(float(val), 4)
+                row[col] = str(round(float(val), 4))
             except (ValueError, TypeError):
-                row[col] = val
+                row[col] = str(val)
         else:
-            row[col] = val
+            row[col] = "" if val == "" else str(val)
 
     new_row_df = pd.DataFrame([row], columns=df.columns)
 

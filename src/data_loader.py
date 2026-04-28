@@ -94,7 +94,14 @@ class SROIEDataset(Dataset):
             "date"    : row["date"]    or "",
             "address" : row["address"] or "",
             "total"   : row["total"]   or "",
-        }
+        } # - changed this from Nan Floats to strings since model runs on strings 
+    #     annotation = {                                                                                              
+    #   "company" : "" if pd.isna(row["company"]) else row["company"],
+    #   "date"    : "" if pd.isna(row["date"])    else row["date"],
+    #   "address" : "" if pd.isna(row["address"]) else row["address"],                                          
+    #   "total"   : "" if pd.isna(row["total"])   else row["total"],
+    # }
+        
         return image, annotation
 
 
