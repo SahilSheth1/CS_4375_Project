@@ -8,8 +8,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from vit_model  import ReceiptViT
+from vit_model   import ReceiptViT
 from field_vocab import FieldVocab, FIELDS, _DF_COL
+
 
 def _encode_batch(annotations: list[dict], vocab: FieldVocab) -> dict[str, torch.Tensor]:
     encoded = {}
@@ -30,20 +31,22 @@ def _run_epoch(
     train:      bool,
 ) -> dict[str, float]:
     model.train(train)
-    total_loss   = 0.0
+    total_loss    = 0.0
     field_correct = {f: 0 for f in FIELDS}
-    n_samples    = 0
+    n_samples     = 0
 
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
         for images, annotations in loader:
-            images  = images.to(device)
-            labels  = _encode_batch(annotations, vocab)
-            labels  = {f: t.to(device) for f, t in labels.items()}
+            images = images.to(device, non_blocking=True)
+            labels = _encode_batch(annotations, vocab)
+            labels = {f: t.to(device, non_blocking=True) for f, t in labels.items()}
 
-            logits  = model(images)
+            logits = model(images)
 
-            loss = sum(criterion(logits[f], labels[f]) for f in FIELDS)
+            # FIX 1: average loss across fields instead of summing
+            # Summing made the loss 4x too large, destabilising the optimizer
+            loss = sum(criterion(logits[f], labels[f]) for f in FIELDS) / len(FIELDS)
 
             if train:
                 optimizer.zero_grad()
@@ -64,32 +67,48 @@ def _run_epoch(
     overall  = sum(accs.values()) / len(FIELDS)
     return {"loss": avg_loss, "accs": accs, "overall_acc": overall}
 
+
 def train_model(
-    model:         ReceiptViT,
-    train_loader:  DataLoader,
-    val_loader:    DataLoader,
-    vocab:         FieldVocab,
-    num_epochs:    int   = 20,
-    lr:            float = 1e-4,
-    device_str:    str   = "cpu",
-    checkpoint_dir: str  = "../Experiments/checkpoints",
+    model:          ReceiptViT,
+    train_loader:   DataLoader,
+    val_loader:     DataLoader,
+    vocab:          FieldVocab,
+    num_epochs:     int   = 20,
+    lr:             float = 1e-4,
+    device_str:     str   = "cpu",
+    checkpoint_dir: str   = "../Experiments/checkpoints",
+    warmup_epochs:  int   = 5,
 ) -> dict[str, Any]:
     device = torch.device(device_str)
     model  = model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.CrossEntropyLoss(ignore_index=-1)
 
-    ckpt_dir  = Path(checkpoint_dir)
+    # FIX 2: linear warmup then cosine decay
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs      # ramp from lr/warmup_epochs → lr
+        progress = (epoch - warmup_epochs) / max(1, num_epochs - warmup_epochs)
+        return 0.5 * (1.0 + torch.cos(torch.tensor(3.14159 * progress)).item())
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_ckpt = ckpt_dir / "best_model.pt"
 
-    best_val_acc  = 0.0
-    best_ckpt     = ckpt_dir / "best_model.pt"
-    history       = []
+    best_val_acc = 0.0
+    history      = []
 
-    print(f"\n{'Epoch':>5}  {'Train Loss':>10}  {'Train Acc':>9}  {'Val Loss':>8}  {'Val Acc':>7}")
-    print("─" * 52)
+    # FIX 3: print per-field accuracy so you can see what's actually learning
+    header = (f"{'Ep':>3}  {'TrLoss':>7}  "
+              + "  ".join(f"{'tr_'+f[:3]:>6}" for f in FIELDS)
+              + f"  {'VaLoss':>7}  "
+              + "  ".join(f"{'va_'+f[:3]:>6}" for f in FIELDS)
+              + "  {'s':>4}")
+    print(header)
+    print("─" * len(header))
 
     for epoch in range(1, num_epochs + 1):
         t0 = time.time()
@@ -99,20 +118,20 @@ def train_model(
         scheduler.step()
 
         elapsed = time.time() - t0
-        print(
-            f"{epoch:5d}  {train_stats['loss']:10.4f}  "
-            f"{train_stats['overall_acc']:9.4f}  "
-            f"{val_stats['loss']:8.4f}  "
-            f"{val_stats['overall_acc']:7.4f}  "
-            f"({elapsed:.0f}s)"
-        )
+
+        tr_accs = "  ".join(f"{train_stats['accs'][f]:6.3f}" for f in FIELDS)
+        va_accs = "  ".join(f"{val_stats['accs'][f]:6.3f}"   for f in FIELDS)
+        print(f"{epoch:3d}  {train_stats['loss']:7.4f}  {tr_accs}  "
+              f"{val_stats['loss']:7.4f}  {va_accs}  {elapsed:4.0f}s")
 
         history.append({
-            "epoch": epoch,
+            "epoch":      epoch,
             "train_loss": train_stats["loss"],
             "train_acc":  train_stats["overall_acc"],
             "val_loss":   val_stats["loss"],
             "val_acc":    val_stats["overall_acc"],
+            **{f"train_acc_{f}": train_stats["accs"][f] for f in FIELDS},
+            **{f"val_acc_{f}":   val_stats["accs"][f]   for f in FIELDS},
         })
 
         if val_stats["overall_acc"] > best_val_acc:
