@@ -1,14 +1,16 @@
 import os
 import json
+from pathlib import Path
+
 import pandas as pd
+import torch
 from PIL import Image
 from sklearn.model_selection import train_test_split
-
-import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 BASE = "../sroie-receipt-dataset/SROIE2019"
+CACHE_DIR = Path("../Experiments/img_cache")
 SPLITS = ["train", "test"]
 SEED = 42
 RESOLUTION = 384
@@ -44,35 +46,37 @@ def build_dataframe(base_path=BASE):
 
 def load_sroie_split(base_path=BASE):
     df = build_dataframe(base_path)
-
     df_train_full = df[df["split"] == "train"].reset_index(drop=True)
     df_test       = df[df["split"] == "test"].reset_index(drop=True)
     df_train, df_val = train_test_split(df_train_full, test_size=0.1, random_state=SEED)
-
     return df_train, df_val, df_test
 
-class SROIEDataset(Dataset):
-    VAL_TRANSFORM = transforms.Compose([
-        transforms.Resize((RESOLUTION, RESOLUTION)),
-        transforms.Grayscale(num_output_channels=3),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
 
+class SROIEDataset(Dataset):
+    # Only used as fallback when cache miss occurs
     TRAIN_TRANSFORM = transforms.Compose([
         transforms.Resize((RESOLUTION, RESOLUTION)),
         transforms.Grayscale(num_output_channels=3),
         transforms.RandomRotation(degrees=3),
         transforms.ColorJitter(brightness=0.3, contrast=0.3),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    def __init__(self, dataframe, base_path=BASE, transform=None, is_train=False):
+    VAL_TRANSFORM = transforms.Compose([
+        transforms.Resize((RESOLUTION, RESOLUTION)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    def __init__(self, dataframe, base_path=BASE, transform=None, is_train=False,
+                 cache_dir=CACHE_DIR):
         self.df        = dataframe.reset_index(drop=True)
         self.base_path = base_path
+        self.is_train  = is_train
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+
         if transform is not None:
             self.transform = transform
         elif is_train:
@@ -84,24 +88,30 @@ class SROIEDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
-        row      = self.df.iloc[idx]
-        img_path = os.path.join(self.base_path, row["split"], "img", row["file"])
-        image    = Image.open(img_path).convert("RGB")
-        image    = self.transform(image)
+        row = self.df.iloc[idx]
+
+        # Try loading from cache first (pre-resized tensor, no augmentation)
+        # For training we skip cache so augmentation (rotation, jitter) still applies
+        cache_path = None
+        if self.cache_dir and not self.is_train:
+            cache_path = self.cache_dir / row["file"].replace(".jpg", ".pt")
+
+        if cache_path and cache_path.exists():
+            image = torch.load(cache_path, weights_only=True)
+        else:
+            img_path = os.path.join(self.base_path, row["split"], "img", row["file"])
+            image = self.transform(Image.open(img_path).convert("RGB"))
+            # Save to cache if it's a val/test image and cache dir exists
+            if cache_path and self.cache_dir:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(image, cache_path)
 
         annotation = {
-            "company" : row["company"] or "",
-            "date"    : row["date"]    or "",
-            "address" : row["address"] or "",
-            "total"   : row["total"]   or "",
-        } # - changed this from Nan Floats to strings since model runs on strings 
-    #     annotation = {                                                                                              
-    #   "company" : "" if pd.isna(row["company"]) else row["company"],
-    #   "date"    : "" if pd.isna(row["date"])    else row["date"],
-    #   "address" : "" if pd.isna(row["address"]) else row["address"],                                          
-    #   "total"   : "" if pd.isna(row["total"])   else row["total"],
-    # }
-        
+            "company": row["company"] or "",
+            "date":    row["date"]    or "",
+            "address": row["address"] or "",
+            "total":   row["total"]   or "",
+        }
         return image, annotation
 
 
@@ -111,22 +121,22 @@ def collate_fn(batch):
     return images, annotations
 
 
-def get_dataloaders(base_path=BASE, batch_size=16):
+def get_dataloaders(base_path=BASE, batch_size=16, num_workers=4, cache_dir=CACHE_DIR):
     df_train, df_val, df_test = load_sroie_split(base_path)
 
     train_loader = DataLoader(
-        SROIEDataset(df_train, base_path, is_train=True),
+        SROIEDataset(df_train, base_path, is_train=True,  cache_dir=cache_dir),
         batch_size=batch_size, shuffle=True,
-        num_workers=2, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        SROIEDataset(df_val, base_path, is_train=False),
+        SROIEDataset(df_val, base_path, is_train=False, cache_dir=cache_dir),
         batch_size=batch_size, shuffle=False,
-        num_workers=2, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
     )
     test_loader = DataLoader(
-        SROIEDataset(df_test, base_path, is_train=False),
+        SROIEDataset(df_test, base_path, is_train=False, cache_dir=cache_dir),
         batch_size=batch_size, shuffle=False,
-        num_workers=2, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
     )
     return train_loader, val_loader, test_loader
