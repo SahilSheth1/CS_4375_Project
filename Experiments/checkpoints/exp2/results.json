@@ -1,8 +1,8 @@
 {
   "train_test_split": "80/10/10",
-  "overall_f1": 0.4286,
-  "exact_match_vendor": 0.2857,
-  "exact_match_date": 0.381,
-  "exact_match_total": 0.619,
-  "exact_match_address": 0.4286
+  "overall_f1": 0.0556,
+  "exact_match_vendor": 0.1111,
+  "exact_match_date": 0.0,
+  "exact_match_total": 0.0317,
+  "exact_match_address": 0.0794
 }

@@ -13,7 +13,7 @@ BASE = "../sroie-receipt-dataset/SROIE2019"
 CACHE_DIR = Path("../Experiments/img_cache")
 SPLITS = ["train", "test"]
 SEED = 42
-RESOLUTION = 384
+RESOLUTION = 224  # FIX (speed): reduced from 384 → 224 (9x fewer attention ops)
 
 
 def build_dataframe(base_path=BASE):
@@ -53,7 +53,6 @@ def load_sroie_split(base_path=BASE):
 
 
 class SROIEDataset(Dataset):
-    # Only used as fallback when cache miss occurs
     TRAIN_TRANSFORM = transforms.Compose([
         transforms.Resize((RESOLUTION, RESOLUTION)),
         transforms.Grayscale(num_output_channels=3),
@@ -90,8 +89,6 @@ class SROIEDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
 
-        # Try loading from cache first (pre-resized tensor, no augmentation)
-        # For training we skip cache so augmentation (rotation, jitter) still applies
         cache_path = None
         if self.cache_dir and not self.is_train:
             cache_path = self.cache_dir / row["file"].replace(".jpg", ".pt")
@@ -101,7 +98,6 @@ class SROIEDataset(Dataset):
         else:
             img_path = os.path.join(self.base_path, row["split"], "img", row["file"])
             image = self.transform(Image.open(img_path).convert("RGB"))
-            # Save to cache if it's a val/test image and cache dir exists
             if cache_path and self.cache_dir:
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
                 torch.save(image, cache_path)
@@ -121,22 +117,31 @@ def collate_fn(batch):
     return images, annotations
 
 
-def get_dataloaders(base_path=BASE, batch_size=16, num_workers=4, cache_dir=CACHE_DIR):
+def get_dataloaders(base_path=BASE, batch_size=32, num_workers=None, cache_dir=CACHE_DIR):
+    # FIX (speed): auto-detect MPS and set safe defaults
+    is_mps = torch.backends.mps.is_available()
+    if num_workers is None:
+        num_workers = 0 if is_mps else 4   # MPS + multiprocessing can deadlock
+    pin_memory = not is_mps                # MPS does not support pin_memory
+
     df_train, df_val, df_test = load_sroie_split(base_path)
 
     train_loader = DataLoader(
         SROIEDataset(df_train, base_path, is_train=True,  cache_dir=cache_dir),
         batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),  # FIX (speed): keeps workers alive between epochs
     )
     val_loader = DataLoader(
         SROIEDataset(df_val, base_path, is_train=False, cache_dir=cache_dir),
         batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),
     )
     test_loader = DataLoader(
         SROIEDataset(df_test, base_path, is_train=False, cache_dir=cache_dir),
         batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, collate_fn=collate_fn
+        num_workers=num_workers, pin_memory=pin_memory, collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),
     )
     return train_loader, val_loader, test_loader

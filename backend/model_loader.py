@@ -24,7 +24,7 @@ TEMPS_PATH  = REPO_ROOT / "Experiments" / "temperatures.json"
 THRESH_PATH = REPO_ROOT / "Experiments" / "thresholds.json"
 QUEUE_PATH  = REPO_ROOT / "Experiments" / "review_queue.json"
 
-IMAGE_SIZE  = 384
+IMAGE_SIZE  = 224
 PATCH_SIZE  = 16
 EMBED_DIM   = 256
 

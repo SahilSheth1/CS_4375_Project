@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -38,18 +39,19 @@ def _run_epoch(
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
         for images, annotations in loader:
-            images = images.to(device, non_blocking=True)
+            # FIX (speed): non_blocking only helps with pin_memory=True.
+            # On MPS pin_memory is unsupported, so just move normally.
+            images = images.to(device)
             labels = _encode_batch(annotations, vocab)
-            labels = {f: t.to(device, non_blocking=True) for f, t in labels.items()}
+            labels = {f: t.to(device) for f, t in labels.items()}
 
             logits = model(images)
 
-            # FIX 1: average loss across fields instead of summing
-            # Summing made the loss 4x too large, destabilising the optimizer
+            # Average loss across fields (summing made it 4x too large)
             loss = sum(criterion(logits[f], labels[f]) for f in FIELDS) / len(FIELDS)
 
             if train:
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)   # FIX (speed): faster than zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -82,13 +84,21 @@ def train_model(
     device = torch.device(device_str)
     model  = model.to(device)
 
+    # FIX (speed): use torch.compile on non-MPS devices — big speedup on CUDA/CPU
+    if device_str not in ("mps",):
+        try:
+            model = torch.compile(model)
+            print("✓ torch.compile enabled")
+        except Exception:
+            pass  # compile not available in older PyTorch versions
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss(ignore_index=-1)
 
-    # FIX 2: linear warmup then cosine decay
+    # Linear warmup then cosine decay
     def lr_lambda(epoch):
         if epoch < warmup_epochs:
-            return (epoch + 1) / warmup_epochs      # ramp from lr/warmup_epochs → lr
+            return (epoch + 1) / warmup_epochs
         progress = (epoch - warmup_epochs) / max(1, num_epochs - warmup_epochs)
         return 0.5 * (1.0 + torch.cos(torch.tensor(3.14159 * progress)).item())
 
@@ -96,12 +106,13 @@ def train_model(
 
     ckpt_dir = Path(checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_ckpt = ckpt_dir / "best_model.pt"
+    best_ckpt  = ckpt_dir / "best_model.pt"
+    hist_path  = ckpt_dir / "history.json"
+    resl_path  = ckpt_dir / "results.json"
 
     best_val_acc = 0.0
     history      = []
 
-    # FIX 3: print per-field accuracy so you can see what's actually learning
     header = (f"{'Ep':>3}  {'TrLoss':>7}  "
               + "  ".join(f"{'tr_'+f[:3]:>6}" for f in FIELDS)
               + f"  {'VaLoss':>7}  "
@@ -134,9 +145,11 @@ def train_model(
             **{f"val_acc_{f}":   val_stats["accs"][f]   for f in FIELDS},
         })
 
+        # Save checkpoint + history every epoch so you never lose progress
         if val_stats["overall_acc"] > best_val_acc:
             best_val_acc = val_stats["overall_acc"]
             torch.save(model.state_dict(), best_ckpt)
+        json.dump(history, open(hist_path, "w"), indent=2)
 
     model.load_state_dict(torch.load(best_ckpt, map_location=device))
     final = _run_epoch(model, val_loader, None, criterion, vocab, device, train=False)
@@ -148,5 +161,6 @@ def train_model(
     for f in FIELDS:
         results[f"exact_match_{f}"] = round(final["accs"][f], 4)
 
+    json.dump(results, open(resl_path, "w"), indent=2)
     print(f"\n✓ Best val overall acc: {best_val_acc:.4f}  |  checkpoint: {best_ckpt}")
     return results, history

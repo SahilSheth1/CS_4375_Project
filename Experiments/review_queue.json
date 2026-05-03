@@ -1,9 +1,9 @@
 {
   "summary": {
-    "total_processed": 348,
+    "total_processed": 352,
     "auto_accepted": 0,
-    "pending_review": 348,
-    "human_reviewed": 0,
+    "pending_review": 352,
+    "human_reviewed": 1,
     "review_rate": 1.0,
     "thresholds_used": {
       "vendor": 0.8,
@@ -162,7 +162,7 @@
           "predicted_text": "<UNK>",
           "confidence": 0.27176183462142944,
           "needs_review": true,
-          "corrected_text": null
+          "corrected_text": "CORRECT_NAME"
         },
         "date": {
           "field_name": "date",
@@ -176,7 +176,7 @@
           "predicted_text": "<UNK>",
           "confidence": 0.4829496145248413,
           "needs_review": true,
-          "corrected_text": null
+          "corrected_text": "12.50"
         },
         "address": {
           "field_name": "address",
@@ -187,7 +187,7 @@
         }
       },
       "auto_accepted": false,
-      "reviewed": false
+      "reviewed": true
     },
     {
       "receipt_id": "receipt_5",
@@ -12187,6 +12187,146 @@
           "field_name": "address",
           "predicted_text": "<UNK>",
           "confidence": 0.4426,
+          "needs_review": true,
+          "corrected_text": null
+        }
+      },
+      "auto_accepted": false,
+      "reviewed": false
+    },
+    {
+      "receipt_id": "X00016469671_4713632e",
+      "fields": {
+        "vendor": {
+          "field_name": "vendor",
+          "predicted_text": "GARDENIA BAKERIES (KL) SDN BHD",
+          "confidence": 0.0783,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "date": {
+          "field_name": "date",
+          "predicted_text": "26/05/2018",
+          "confidence": 0.0057,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "total": {
+          "field_name": "total",
+          "predicted_text": "8.70",
+          "confidence": 0.0087,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "address": {
+          "field_name": "address",
+          "predicted_text": "LOT 3, JALAN PELABUR 23/1, 40300 SHAH ALAM, SELANGOR.",
+          "confidence": 0.0589,
+          "needs_review": true,
+          "corrected_text": null
+        }
+      },
+      "auto_accepted": false,
+      "reviewed": false
+    },
+    {
+      "receipt_id": "X51005288570_f8a7bcf1",
+      "fields": {
+        "vendor": {
+          "field_name": "vendor",
+          "predicted_text": "GARDENIA BAKERIES (KL) SDN BHD",
+          "confidence": 0.0788,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "date": {
+          "field_name": "date",
+          "predicted_text": "26/05/2018",
+          "confidence": 0.0055,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "total": {
+          "field_name": "total",
+          "predicted_text": "8.70",
+          "confidence": 0.0085,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "address": {
+          "field_name": "address",
+          "predicted_text": "LOT 3, JALAN PELABUR 23/1, 40300 SHAH ALAM, SELANGOR.",
+          "confidence": 0.0592,
+          "needs_review": true,
+          "corrected_text": null
+        }
+      },
+      "auto_accepted": false,
+      "reviewed": false
+    },
+    {
+      "receipt_id": "X51005288570_29b3de33",
+      "fields": {
+        "vendor": {
+          "field_name": "vendor",
+          "predicted_text": "GARDENIA BAKERIES (KL) SDN BHD",
+          "confidence": 0.0788,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "date": {
+          "field_name": "date",
+          "predicted_text": "26/05/2018",
+          "confidence": 0.0055,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "total": {
+          "field_name": "total",
+          "predicted_text": "8.70",
+          "confidence": 0.0085,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "address": {
+          "field_name": "address",
+          "predicted_text": "LOT 3, JALAN PELABUR 23/1, 40300 SHAH ALAM, SELANGOR.",
+          "confidence": 0.0592,
+          "needs_review": true,
+          "corrected_text": null
+        }
+      },
+      "auto_accepted": false,
+      "reviewed": false
+    },
+    {
+      "receipt_id": "X00016469670_3f84926e",
+      "fields": {
+        "vendor": {
+          "field_name": "vendor",
+          "predicted_text": "GARDENIA BAKERIES (KL) SDN BHD",
+          "confidence": 0.079,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "date": {
+          "field_name": "date",
+          "predicted_text": "26/05/2018",
+          "confidence": 0.0055,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "total": {
+          "field_name": "total",
+          "predicted_text": "8.70",
+          "confidence": 0.0085,
+          "needs_review": true,
+          "corrected_text": null
+        },
+        "address": {
+          "field_name": "address",
+          "predicted_text": "LOT 3, JALAN PELABUR 23/1, 40300 SHAH ALAM, SELANGOR.",
+          "confidence": 0.0599,
           "needs_review": true,
           "corrected_text": null
         }

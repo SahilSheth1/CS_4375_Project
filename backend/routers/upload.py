@@ -20,7 +20,7 @@ from schemas import FieldResult, ReceiptResponse
 router = APIRouter(prefix="/upload", tags=["upload"])
 
 TRANSFORM = transforms.Compose([
-    transforms.Resize((384, 384)),
+    transforms.Resize((224, 224)),
     transforms.Grayscale(num_output_channels=3),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
