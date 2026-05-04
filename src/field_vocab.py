@@ -13,20 +13,20 @@ PAD_IDX = 1
 FIELDS = ["vendor", "date", "total", "address"]
 _DF_COL = {"vendor": "company", "date": "date", "total": "total", "address": "address"}
 
-# Maximum output length per field (in characters)
+# Maximum output length per field (in characters) - future reference, maybe string if not compatable wit the other methdods
 MAX_LEN = {"vendor": 48, "date": 10, "total": 8, "address": 64}
-MAX_LEN_INT = max(MAX_LEN.values())  # ← ADD THIS (= 64)
+MAX_LEN_INT = max(MAX_LEN.values())  # value is 64 as of Apr 28
 
 CHAR_VOCAB = (
     [UNK, PAD]
     + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    + list("abcdefghijklmnopqrstuvwxyz")  # ← ADD lowercase
+    + list("abcdefghijklmnopqrstuvwxyz")  # lowercase list 
     + list("0123456789")
-    + list(" .,/-:()&'@#%+*=_\"!?;")  # ← ADD more punctuation
+    + list(" .,/-:()&'@#%+*=_\"!?;")  # punctuation list - HERE IS WHERE WE ADD MORE IN THE FUTURE
 )
 CHAR2IDX = {c: i for i, c in enumerate(CHAR_VOCAB)}
 IDX2CHAR = {i: c for i, c in enumerate(CHAR_VOCAB)}
-CHAR_VOCAB_SIZE = len(CHAR_VOCAB)  # ~44 chars
+CHAR_VOCAB_SIZE = len(CHAR_VOCAB) 
 
 
 def normalize_label(field: str, value: str) -> str:
@@ -106,7 +106,7 @@ class FieldVocab:
                 f,
                 indent=2,
             )
-        print(f"✓ Char vocab saved to {path}")
+        print(f" Char vocab saved to {path}")
 
     @classmethod
     def load(cls, path: str | Path) -> "FieldVocab":

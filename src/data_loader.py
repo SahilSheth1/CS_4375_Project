@@ -81,7 +81,7 @@ def load_cord_split(cord_cache_dir=CORD_CACHE_DIR):
             pd.DataFrame(index["test"]),
         )
 
-    print("  CORD: first run — saving images to disk (runs once)...")
+    print("  CORD: initial run saving images to disk (runs once)")
     cord_cache_dir.mkdir(parents=True, exist_ok=True)
     ds = load_dataset("naver-clova-ix/cord-v2")
 

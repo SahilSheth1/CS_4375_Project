@@ -45,9 +45,7 @@ class ReceiptResult:
         return d
 
 
-# ReviewQueue
-
-
+#BTW  Removed stack implementation since it didn't make sense at all and want compatable 
 class ReviewQueue:
     def __init__(self, thresholds: Dict[str, float]):
 
@@ -55,8 +53,7 @@ class ReviewQueue:
         self.auto_accepted: List[ReceiptResult] = []
         self.pending_review: List[ReceiptResult] = []
 
-    # Core ingestion
-
+    # Comes before user review 
     def ingest(
         self,
         receipt_id: str,
@@ -83,8 +80,7 @@ class ReviewQueue:
 
         return result
 
-    # Human correction
-
+    # Main method through backend communication 
     def apply_correction(
         self,
         receipt_id: str,
@@ -99,8 +95,7 @@ class ReviewQueue:
                 return result
         return None
 
-    # Statistics
-
+    # Statistics 
     def review_rate(self) -> float:
         total = len(self.auto_accepted) + len(self.pending_review)
         if total == 0:
@@ -162,7 +157,7 @@ class ReviewQueue:
 
 
 # Convenience: run the full test set through the queue
-
+# Returns queue and list of dicts.  one row per receipt for making logging easier 
 
 def build_review_queue_from_loader(
     model,

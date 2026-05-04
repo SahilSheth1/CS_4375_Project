@@ -36,7 +36,7 @@ _FIELD_ALIASES: dict[str, str] = {
     "company": "vendor",
 }
 
-# Metric columns — values here should be rounded floats or blank.
+# Metric columns  values here should be rounded floats or blank.
 _METRIC_COLS: set[str] = {
     "exact_match_vendor",
     "exact_match_date",
@@ -59,7 +59,7 @@ def initialize_log(path: str | Path = "experiment_log.csv") -> None:
         return
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=COLUMNS).to_csv(csv_path, index=False)
-    print(f"✓ Initialized {csv_path}")
+    print(f"Initialized {csv_path}")
 
 
 # log_experiment
@@ -114,7 +114,7 @@ def log_experiment(
             "Close experiment_log.csv in Excel/Sheets and retry."
         )
 
-    print(f"✓ {experiment_id} logged to {csv_path}")
+    print(f" {experiment_id} logged to {csv_path}")
 
 
 # log_from_json
@@ -187,7 +187,7 @@ def prepare_vit_rows(path: str | Path = "experiment_log.csv") -> None:
     vit_configs = [
         {
             "experiment_id": "Exp2",
-            "description": "ViT — patch=16, layers=4, heads=4",
+            "description": "ViT  patch=16, layers=4, heads=4",
             "model_type": "ViT",
             "patch_size": 16,
             "num_layers": 4,
@@ -197,7 +197,7 @@ def prepare_vit_rows(path: str | Path = "experiment_log.csv") -> None:
         },
         {
             "experiment_id": "Exp3",
-            "description": "ViT — patch=16, layers=6, heads=8",
+            "description": "ViT  patch=16, layers=6, heads=8",
             "model_type": "ViT",
             "patch_size": 16,
             "num_layers": 6,
@@ -224,7 +224,7 @@ def prepare_vit_rows(path: str | Path = "experiment_log.csv") -> None:
     for cfg in vit_configs:
         exp_id = cfg["experiment_id"]
         if exp_id in existing_ids:
-            print(f"  {exp_id} already exists — skipping")
+            print(f"  {exp_id} already exists  skipping")
             continue
         params = {k: v for k, v in cfg.items() if k != "experiment_id"}
         log_experiment(exp_id, params, path=csv_path)

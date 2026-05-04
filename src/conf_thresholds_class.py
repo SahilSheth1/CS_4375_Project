@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_THRESH = REPO_ROOT / "Experiments" / "thresholds.json"
 DEFAULT_LOG = REPO_ROOT / "Experiments" / "experiment_log.csv"
 
-
+# Applying to prediction of the model based on conf socres and thresholds - used at the model.ipynb end 
 class ConfidenceThresholdManager:
     def __init__(self, scorer: ConfidenceScorer):
         self.scorer = scorer
@@ -42,7 +42,7 @@ class ConfidenceThresholdManager:
         n = conf.shape[0]
         if n == 0:
             return 0.0
-
+        # will based on the specific mode ie precision, coverage or maximun f1 score - within the list 
         if mode == "target_precision":
             candidates = np.unique(np.concatenate([[0.0], conf]))
             candidates.sort()
@@ -55,7 +55,7 @@ class ConfidenceThresholdManager:
                 if precision >= target:
                     return float(t)
             return float(conf.max())
-
+        # at least target percentage of data is held 
         if mode == "target_coverage":
             candidates = np.unique(np.concatenate([[0.0], conf]))
             candidates.sort()
@@ -67,7 +67,7 @@ class ConfidenceThresholdManager:
                 else:
                     break
             return best_t
-
+        # Best f1 score in the list of them 
         if mode == "max_f1":
             sweep = np.linspace(0.0, 1.0, 200)
             best_f1 = -1.0
@@ -90,7 +90,7 @@ class ConfidenceThresholdManager:
         raise ValueError(
             "mode must be 'target_precision', 'target_coverage', or 'max_f1'"
         )
-
+    # Renovated to work on all thresholds at once instead of one by one in each field - should cover the rest of the operations
     def select_all_thresholds(
         self,
         val_loader: DataLoader,
@@ -116,10 +116,10 @@ class ConfidenceThresholdManager:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             with open(save_path, "w") as fh:
                 json.dump(thresholds, fh, indent=2)
-            print(f"✓ Thresholds saved to {save_path}")
+            print(f" Thresholds saved to {save_path}")
 
         return thresholds
-
+    # Goes to all batches of images at once 
     def apply_thresholds(
         self,
         images: torch.Tensor,
@@ -129,7 +129,7 @@ class ConfidenceThresholdManager:
     ) -> dict[str, dict[str, list]]:
         raw = self.scorer.predict_with_confidence(images, temperatures=temperatures)
 
-        out: dict[str, dict[str, list]] = {}
+        out: dict[str, dict[str, list]] = {} # label is string, conf is float, abstained is bool 
         for field, payload in raw.items():
             t = float(thresholds.get(field, 0.0))
             labels = list(payload["label"])
@@ -140,7 +140,7 @@ class ConfidenceThresholdManager:
             ]
             out[field] = {"label": labels, "confidence": confs, "abstained": abstain}
         return out
-
+    # Important for evaluating on valid. set when selecting thresholds in the end.
     def compute_operating_point(
         self,
         loader: DataLoader,
@@ -187,6 +187,7 @@ class ConfidenceThresholdManager:
             "any_abstained_rate": any_rate,
         }
 
+    # TODO: implement extra metrics such as F1/ preciision and recall 
     @staticmethod
     def log_operating_point(
         operating_point_dict: dict[str, Any],

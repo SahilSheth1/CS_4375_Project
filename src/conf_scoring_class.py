@@ -21,7 +21,9 @@ DEFAULT_TEMPS = REPO_ROOT / "Experiments" / "temperatures.json"
 DEFAULT_PLOTS = REPO_ROOT / "Experiments" / "calibration_plots"
 DATASET_BASE = REPO_ROOT / "sroie-receipt-dataset" / "SROIE2019"
 
-
+# Implementing teh summation formula from research paper 
+# Formula will go as follows: summation over the number of bins ( weight of bins times the abs difference of acc_bin and conf_bin)
+# TODO: measure accross all categories and take avg of ECE in those categories
 class ConfidenceScorer:
     def __init__(
         self, model: ReceiptViT, vocab: FieldVocab, device: torch.device | str
@@ -63,7 +65,7 @@ class ConfidenceScorer:
                 text = self.vocab.decode(field, seq)
                 labels.append(text)
 
-                # Non-PAD confidence if prediction has characters
+                # Non-PAD confidence if prediction has characters if not the use the average conf.
                 non_pad_confs = [c for token, c in zip(seq, seq_conf) if token != 1]
 
                 if len(non_pad_confs) > 0:
@@ -111,6 +113,7 @@ class ConfidenceScorer:
     def fit_temperature(
         logits_val: torch.Tensor, labels_val: torch.Tensor, max_iter: int = 100
     ) -> float:
+        # B is the batch size which will used in ECE 
         logits_val = logits_val.detach().cpu()  # (B, max_len, vocab_size)
         labels_val = labels_val.detach().cpu().long()  # (B, max_len)
 
@@ -146,7 +149,7 @@ class ConfidenceScorer:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             with open(save_path, "w") as fh:
                 json.dump(temperatures, fh, indent=2)
-            print(f"✓ Temperatures saved to {save_path}")
+            print(f"Temperatures saved to {save_path}")
 
         return temperatures
 
@@ -262,7 +265,7 @@ class ConfidenceScorer:
         ax.set_ylim(0, 1)
         ax.set_xlabel("Confidence")
         ax.set_ylabel("Accuracy")
-        ax.set_title(f"Reliability — {field_name}")
+        ax.set_title(f"Reliability - {field_name}")
         ax.legend(loc="upper left", fontsize=8)
         plt.tight_layout()
 
