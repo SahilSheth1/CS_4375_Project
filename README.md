@@ -40,7 +40,11 @@ Experiments/checkpoints/exp3/best_model.pt
 
 ## Run Backend
 cd backend
-uvicorn main:app --reload --port 8000
+```uvicorn main:app --reload --port 8000```
+
+## Run Frontend
+cd fronend
+```npm run dev```
 
 ## Results
 Vendor ~78%
