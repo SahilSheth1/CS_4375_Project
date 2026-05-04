@@ -44,7 +44,7 @@ def _decoded_exact_match(logits, labels, annotations, vocab):
 
     return {f: correct[f] / n for f in FIELDS}
 
-
+# No gradient desc in train? 
 def _run_epoch(
     model, loader, optimizer, criterion, vocab, device, train, scheduler=None
 ):
@@ -54,7 +54,7 @@ def _run_epoch(
     field_correct = {f: 0.0 for f in FIELDS}
     n_samples = 0
 
-    ctx = torch.enable_grad() if train else torch.no_grad()
+    ctx = torch.enable_grad() if train else torch.no_grad() # here
 
     with ctx:
         for images, annotations in loader:
@@ -131,6 +131,7 @@ def train_model(
     best_val_acc = -1.0
     history = []
 
+    # Autism bonanza but finally got it working 
     header = (
         f"{'Ep':>3}  {'TrLoss':>7}  "
         + "  ".join(f"{'tr_' + f[:3]:>6}" for f in FIELDS)
@@ -169,7 +170,7 @@ def train_model(
             f"{epoch:3d}  {train_stats['loss']:7.4f}  {tr_accs}  "
             f"{val_stats['loss']:7.4f}  {va_accs}  {elapsed:4.0f}s"
         )
-
+        # added val_acc 
         history.append(
             {
                 "epoch": epoch,
@@ -192,7 +193,7 @@ def train_model(
     model.load_state_dict(torch.load(best_ckpt, map_location=device))
 
     final = _run_epoch(model, val_loader, None, criterion, vocab, device, train=False)
-
+    # Updated the split to compliment for validation 
     results = {
         "train_test_split": "80/10/10",
         "overall_f1": round(final["overall_acc"], 4),
@@ -204,6 +205,6 @@ def train_model(
     with open(resl_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n✓ Best val overall acc: {best_val_acc:.4f}  |  checkpoint: {best_ckpt}")
+    print(f"\n Best val overall acc: {best_val_acc:.4f}  |  checkpoint: {best_ckpt}")
 
     return results, history

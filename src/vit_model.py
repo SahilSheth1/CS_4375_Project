@@ -1,13 +1,18 @@
 import torch
 import torch.nn as nn
 
+# PatchEmbedding 
+# Patch size is 16 
+# Image size was 387 changing it to 224 for faster testin
 
+# TWO DROPOUT layers just as an FYI - for future me 
+# TODO: Update image_size to 224 accross the other files  
 class PatchEmbedding(nn.Module):
     def __init__(
         self,
-        image_size: int = 224,
+        image_size: int = 224, # *** CHANGED TO 224 from 387 *** 
         patch_size: int = 16,
-        in_channels: int = 3,
+        in_channels: int = 3, 
         embed_dim: int = 256,
     ):
         super().__init__()
@@ -20,12 +25,14 @@ class PatchEmbedding(nn.Module):
         self.patch_size = patch_size
         self.num_patches = (image_size // patch_size) ** 2
 
-        # Size of the raw flattened patch vector: P*P*C
+        # Size of the raw flattened patch vector: P*P*C 
+        # patch_dim is also Useful in Positional Embedding fyi
         patch_dim = patch_size * patch_size * in_channels
 
         self.projection_weight = nn.Parameter(torch.empty(embed_dim, patch_dim))
         self.projection_bias = nn.Parameter(torch.zeros(embed_dim))
 
+        # Changed to kaiming since it does best in stabilizing grad flow 
         nn.init.kaiming_uniform_(self.projection_weight, nonlinearity="linear")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -60,7 +67,7 @@ class LearnablePositionalEmbedding(nn.Module):
 
         self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
 
-        # Normal initialisation with small std — standard practice for pos embeds
+        # Normal distribution for now - mess around with it if yoou can 
         nn.init.normal_(self.position_embeddings, mean=0.0, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -92,7 +99,7 @@ class PatchAndPositionEmbedding(nn.Module):
             num_patches=self.patch_embedding.num_patches,
             embed_dim=embed_dim,
         )
-
+    # Simplified it a lot more - paper makes it sound more complicated than it is - maybe im wrong 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (B, N, D)
         x = self.patch_embedding(x)
@@ -109,7 +116,7 @@ class MultiHeadSelfAttention(nn.Module):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
         assert (
-            embed_dim % num_heads == 0
+            embed_dim % num_heads == 0 # Tbh magic don't know how this hasn't been an issue 
         ), f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -164,7 +171,7 @@ class FeedForwardBlock(nn.Module):
             f"hidden_dim={self.net[0].out_features}"
         )
 
-
+# This also goes into the ViTEncoder layer where we still need to add feedforward
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -184,7 +191,7 @@ class TransformerEncoderLayer(nn.Module):
         x = x + self.ffn(self.norm2(x))
         return x
 
-
+# Adi: Changed the image size to fit with the changes in dimensiosn 
 class ViTEncoder(nn.Module):
     def __init__(
         self,
@@ -247,7 +254,7 @@ class CharFieldHead(nn.Module):
         self.proj = nn.Linear(embed_dim, self.vocab_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, N, D) — patch tokens from encoder
+        # x: (B, N, D)  patch tokens from encoder over each iteration matching with encoder 
         B = x.size(0)
         # (B, max_len, D)
         q = self.query.unsqueeze(0).expand(B, -1, -1)
