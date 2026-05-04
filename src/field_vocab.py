@@ -6,96 +6,108 @@ from pathlib import Path
 import pandas as pd
 
 UNK = "<UNK>"
+PAD = "<PAD>"
 UNK_IDX = 0
+PAD_IDX = 1
 
 FIELDS = ["vendor", "date", "total", "address"]
-
 _DF_COL = {"vendor": "company", "date": "date", "total": "total", "address": "address"}
 
+# Maximum output length per field (in characters)
+MAX_LEN = {"vendor": 48, "date": 10, "total": 8, "address": 64}
+MAX_LEN_INT = max(MAX_LEN.values())  # ← ADD THIS (= 64)
 
-# ---------------------------------------------------------------------------
-# Normalization
-# ---------------------------------------------------------------------------
+CHAR_VOCAB = (
+    [UNK, PAD]
+    + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    + list("abcdefghijklmnopqrstuvwxyz")  # ← ADD lowercase
+    + list("0123456789")
+    + list(" .,/-:()&'@#%+*=_\"!?;")  # ← ADD more punctuation
+)
+CHAR2IDX = {c: i for i, c in enumerate(CHAR_VOCAB)}
+IDX2CHAR = {i: c for i, c in enumerate(CHAR_VOCAB)}
+CHAR_VOCAB_SIZE = len(CHAR_VOCAB)  # ~44 chars
+
 
 def normalize_label(field: str, value: str) -> str:
-    """Normalize a raw label string before vocab build and at inference time."""
     if not value:
         return ""
     value = value.strip()
-
     if field == "date":
-        # Try common date formats → canonical DD/MM/YYYY
         for fmt in (
-            "%d/%m/%Y", "%d/%m/%y",
-            "%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y",
-            "%d %b %Y", "%d %B %Y",
-            "%d.%m.%Y", "%d.%m.%y",
-            "%m/%d/%Y", "%m/%d/%y",
+            "%d/%m/%Y",
+            "%d/%m/%y",
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d-%m-%y",
+            "%d %b %Y",
+            "%d %B %Y",
+            "%d.%m.%Y",
+            "%d.%m.%y",
+            "%m/%d/%Y",
+            "%m/%d/%y",
         ):
             try:
                 return datetime.strptime(value, fmt).strftime("%d/%m/%Y")
             except ValueError:
                 pass
         return value.upper()
-
     if field == "total":
-        # Strip currency symbols and thousands separators, keep decimal
         num = re.sub(r"[^\d.]", "", value)
         try:
             return f"{float(num):.2f}"
         except ValueError:
             return value.upper()
-
-    # vendor and address — uppercase + collapse whitespace
     return re.sub(r"\s+", " ", value.upper())
 
 
-# ---------------------------------------------------------------------------
-# FieldVocab
-# ---------------------------------------------------------------------------
+def encode_chars(field: str, text: str) -> list[int]:
+    maxlen = MAX_LEN[field]
+    text = normalize_label(field, text)[:maxlen]
+    idxs = [CHAR2IDX.get(c, UNK_IDX) for c in text]
+    # Pad to maxlen
+    idxs += [PAD_IDX] * (maxlen - len(idxs))
+    return idxs
+
+
+def decode_chars(field: str, indices: list[int]) -> str:
+    chars = [IDX2CHAR.get(i, "") for i in indices if i not in (PAD_IDX, UNK_IDX)]
+    return "".join(chars).strip()
+
 
 class FieldVocab:
-    def __init__(self, vocabs: dict[str, dict[str, int]]):
-        self.vocabs = vocabs
-        self.inv    = {f: {v: k for k, v in vocabs[f].items()} for f in FIELDS}
+    def __init__(self, vocabs: dict = None):
+        # vocabs param kept for load() compatibility but not used
+        pass
 
     @classmethod
     def build(cls, df_train: pd.DataFrame) -> "FieldVocab":
-        vocabs = {}
-        for field in FIELDS:
-            col = _DF_COL[field]
-            raw_labels = df_train[col].dropna().astype(str).tolist()
-            # Normalize before building vocab so unseen formats still map correctly
-            labels = sorted(set(normalize_label(field, l) for l in raw_labels))
-            labels = [l for l in labels if l]   # drop empty strings
-            mapping = {UNK: UNK_IDX}
-            for i, lbl in enumerate(labels, start=1):
-                mapping[lbl] = i
-            vocabs[field] = mapping
-        return cls(vocabs)
+        return cls()
 
-    def encode(self, field: str, label: str) -> int:
-        """Normalize then encode; unknown values map to UNK_IDX."""
-        normalized = normalize_label(field, label)
-        return self.vocabs[field].get(normalized, UNK_IDX)
+    def encode(self, field: str, label: str) -> list[int]:
+        return encode_chars(field, label)
 
-    def decode(self, field: str, idx: int) -> str:
-        return self.inv[field].get(idx, UNK)
+    def decode(self, field: str, indices: list[int] | int) -> str:
+        if isinstance(indices, int):
+            return IDX2CHAR.get(indices, "")
+        return decode_chars(field, indices)
 
     def size(self, field: str) -> int:
-        return len(self.vocabs[field])
+        return CHAR_VOCAB_SIZE
 
     def vocab_sizes(self) -> dict[str, int]:
-        return {f: self.size(f) for f in FIELDS}
+        return {f: CHAR_VOCAB_SIZE for f in FIELDS}
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as fh:
-            json.dump(self.vocabs, fh, indent=2)
-        print(f"✓ Vocab saved to {path}")
+        with open(path, "w") as f:
+            json.dump(
+                {"type": "char_level", "vocab": CHAR_VOCAB, "max_len": MAX_LEN},
+                f,
+                indent=2,
+            )
+        print(f"✓ Char vocab saved to {path}")
 
     @classmethod
     def load(cls, path: str | Path) -> "FieldVocab":
-        with open(path) as fh:
-            vocabs = json.load(fh)
-        return cls(vocabs)
+        return cls()

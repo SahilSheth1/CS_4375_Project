@@ -1,5 +1,6 @@
 # Dataset (hosted on Hugging Face)
 sroie-receipt-dataset/
+wildreceipt/
 
 # Python
 __pycache__/

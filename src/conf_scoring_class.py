@@ -1,8 +1,3 @@
-"""
-Class-based confidence scoring and calibration for ReceiptViT.
-Import this in notebooks instead of running conf_scoring.py as a script.
-"""
-
 from __future__ import annotations
 
 import json
@@ -19,7 +14,6 @@ from vit_model import ReceiptViT
 from field_vocab import FieldVocab, FIELDS, _DF_COL
 from data_loader import SROIEDataset, load_sroie_split, collate_fn
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CKPT = REPO_ROOT / "Experiments" / "checkpoints" / "exp2" / "best_model.pt"
 DEFAULT_VOCAB = REPO_ROOT / "Experiments" / "vocab.json"
@@ -29,7 +23,9 @@ DATASET_BASE = REPO_ROOT / "sroie-receipt-dataset" / "SROIE2019"
 
 
 class ConfidenceScorer:
-    def __init__(self, model: ReceiptViT, vocab: FieldVocab, device: torch.device | str):
+    def __init__(
+        self, model: ReceiptViT, vocab: FieldVocab, device: torch.device | str
+    ):
         self.model = model
         self.vocab = vocab
         self.device = torch.device(device)
@@ -46,16 +42,43 @@ class ConfidenceScorer:
         logits_dict = self.model(images)
 
         out: dict[str, dict[str, list]] = {}
+
         for field, logits in logits_dict.items():
             T = float((temperatures or {}).get(field, 1.0))
             T = max(T, 1e-3)
+
             probs = torch.softmax(logits / T, dim=-1)
+
+            # conf shape: batch_size, max_len
+            # idx shape: batch_size, max_len
             conf, idx = probs.max(dim=-1)
-            labels = [self.vocab.decode(field, int(i)) for i in idx.cpu().tolist()]
+
+            idx_batch = idx.detach().cpu().tolist()
+            conf_batch = conf.detach().cpu().tolist()
+
+            labels = []
+            confidences = []
+
+            for seq, seq_conf in zip(idx_batch, conf_batch):
+                text = self.vocab.decode(field, seq)
+                labels.append(text)
+
+                # Non-PAD confidence if prediction has characters
+                non_pad_confs = [c for token, c in zip(seq, seq_conf) if token != 1]
+
+                if len(non_pad_confs) > 0:
+                    field_conf = sum(non_pad_confs) / len(non_pad_confs)
+                else:
+                    # If model predicts all PAD/blank, still use its confidence instead of incorrectly forcing confidence to 0.0
+                    field_conf = sum(seq_conf) / len(seq_conf)
+
+                confidences.append(float(field_conf))
+
             out[field] = {
                 "label": labels,
-                "confidence": [float(c) for c in conf.cpu().tolist()],
+                "confidence": confidences,
             }
+
         return out
 
     def collect_logits_labels(
@@ -72,7 +95,10 @@ class ConfidenceScorer:
                 logits = self.model(images)
                 for field in FIELDS:
                     col = _DF_COL[field]
-                    indices = [self.vocab.encode(field, ann.get(col, "")) for ann in annotations]
+                    indices = [
+                        self.vocab.encode(field, ann.get(col, ""))
+                        for ann in annotations
+                    ]
                     field_logits[field].append(logits[field].detach().cpu())
                     field_labels[field].append(torch.tensor(indices, dtype=torch.long))
 
@@ -82,17 +108,20 @@ class ConfidenceScorer:
         )
 
     @staticmethod
-    def fit_temperature(logits_val: torch.Tensor, labels_val: torch.Tensor, max_iter: int = 100) -> float:
-        logits_val = logits_val.detach().cpu()
-        labels_val = labels_val.detach().cpu().long()
+    def fit_temperature(
+        logits_val: torch.Tensor, labels_val: torch.Tensor, max_iter: int = 100
+    ) -> float:
+        logits_val = logits_val.detach().cpu()  # (B, max_len, vocab_size)
+        labels_val = labels_val.detach().cpu().long()  # (B, max_len)
 
         T = nn.Parameter(torch.ones(1))
-        nll = nn.CrossEntropyLoss()
+        nll = nn.CrossEntropyLoss(ignore_index=1)  # 1 = PAD_IDX
         opt = torch.optim.LBFGS([T], lr=0.01, max_iter=max_iter)
 
         def closure():
             opt.zero_grad()
-            loss = nll(logits_val / T.clamp(min=1e-3), labels_val)
+            # CE expects (B, vocab_size, max_len)
+            loss = nll(logits_val.permute(0, 2, 1) / T.clamp(min=1e-3), labels_val)
             loss.backward()
             return loss
 
@@ -122,7 +151,9 @@ class ConfidenceScorer:
         return temperatures
 
     @staticmethod
-    def compute_ece(confidences: np.ndarray, accuracies: np.ndarray, n_bins: int = 10) -> float:
+    def compute_ece(
+        confidences: np.ndarray, accuracies: np.ndarray, n_bins: int = 10
+    ) -> float:
         confidences = np.asarray(confidences, dtype=np.float64).reshape(-1)
         accuracies = np.asarray(accuracies, dtype=np.float64).reshape(-1)
         n = confidences.shape[0]
@@ -150,10 +181,16 @@ class ConfidenceScorer:
         T: float = 1.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         T = max(float(T), 1e-3)
+        # (B, max_len, vocab_size)
         probs = torch.softmax(logits / T, dim=-1)
+        # (B, max_len)
         conf, pred = probs.max(dim=-1)
-        correct = (pred == labels).float()
-        return conf.numpy(), correct.numpy()
+
+        # Mask out PAD positions (PAD_IDX=1) so they don't inflate accuracy
+        pad_mask = labels != 1
+        conf = conf[pad_mask].numpy()
+        correct = (pred[pad_mask] == labels[pad_mask]).float().numpy()
+        return conf, correct
 
     def evaluate_calibration(
         self,
@@ -164,7 +201,9 @@ class ConfidenceScorer:
 
         results: dict[str, dict[str, float]] = {}
         for field in FIELDS:
-            conf_raw, acc_raw = self.conf_acc_from_logits(field_logits[field], field_labels[field], T=1.0)
+            conf_raw, acc_raw = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=1.0
+            )
             ece_raw = self.compute_ece(conf_raw, acc_raw)
 
             if temperatures and field in temperatures:
@@ -210,7 +249,14 @@ class ConfidenceScorer:
 
         width = 1.0 / n_bins
         fig, ax = plt.subplots(figsize=(5, 5))
-        ax.bar(centers, bin_acc, width=width * 0.95, edgecolor="black", alpha=0.85, label="Accuracy")
+        ax.bar(
+            centers,
+            bin_acc,
+            width=width * 0.95,
+            edgecolor="black",
+            alpha=0.85,
+            label="Accuracy",
+        )
         ax.plot([0, 1], [0, 1], "--", linewidth=1, label="Perfect calibration")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
@@ -238,9 +284,13 @@ class ConfidenceScorer:
 
         for field in FIELDS:
             T = temperatures.get(field, 1.0)
-            conf, correct = self.conf_acc_from_logits(field_logits[field], field_labels[field], T=T)
+            conf, correct = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
             out_path = save_dir / f"reliability_{field}.png"
-            self.plot_reliability_diagram(conf, correct, field_name=field, save_path=out_path)
+            self.plot_reliability_diagram(
+                conf, correct, field_name=field, save_path=out_path
+            )
             print(f"  saved {out_path}")
 
     def precision_coverage_curve(
@@ -256,7 +306,9 @@ class ConfidenceScorer:
         results: dict[str, dict[str, list]] = {}
         for field in FIELDS:
             T = float((temperatures or {}).get(field, 1.0))
-            conf, correct = self.conf_acc_from_logits(field_logits[field], field_labels[field], T=T)
+            conf, correct = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
             n = len(conf)
 
             precs: list[float] = []
@@ -287,12 +339,24 @@ class ConfidenceDataModule:
         batch_size: int = 16,
         num_workers: int = 0,
     ) -> DataLoader:
-        val_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.Grayscale(num_output_channels=3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        val_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
         _, df_val, _ = load_sroie_split(str(dataset_base))
-        val_dataset = SROIEDataset(df_val, base_path=str(dataset_base), transform=val_transform)
-        return DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
+        val_dataset = SROIEDataset(
+            df_val, base_path=str(dataset_base), transform=val_transform
+        )
+        return DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+        )

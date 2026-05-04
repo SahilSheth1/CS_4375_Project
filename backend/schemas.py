@@ -1,7 +1,3 @@
-"""
-schemas.py — Pydantic models for all request and response bodies
-"""
-
 from __future__ import annotations
 from typing import Optional
 from pydantic import BaseModel

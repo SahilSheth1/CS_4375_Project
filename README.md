@@ -1,40 +1,52 @@
-# Transformer-based Vision Encoder for Automated Receipt Digitization
+# Receipt Understanding with Vision Transformers
+Sahil Sheth - SRS210011
+Manraj Singh - MXS220007
+Aditya Desai - ASD210004
 
-**CS 4375 ML Project**
+## Overview
+This project implements a Vision Transformer-based system for extracting structured data from receipts.
 
-A receipt digitization system that reads receipt images and extracts structured fields using a custom-implemented Vision Transformer encoder. Low-confidence predictions are flagged for manual human review.
+Fields extracted:
+- Vendor
+- Date
+- Total
+- Address
 
-## Dataset
+Includes:
+- Confidence calibration (temperature scaling)
+- Human-in-the-loop review queue
+- FastAPI backend
 
-The project uses the **ICDAR 2019 SROIE** dataset (987 annotated English receipt images).
+## Dataset (Public)
+SROIE: https://rrc.cvc.uab.es/?ch=13  
+CORD: https://github.com/clovaai/cord  
+WildReceipt (optional): https://github.com/AlibabaResearch/WildReceipt
 
-Dataset hosted on Hugging Face (no download required):
-**https://huggingface.co/datasets/SahilSheth1/sroie-receipt-dataset**
+Place datasets in project root:
+CORD/
+sroie-receipt-dataset/
+wildreceipt/
 
-> The dataset is **not** included in this repository
-
-## Setup Instructions
-
-### 1. Install dependencies
-
-```bash
+## Setup
+python3.11 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Download the dataset
+## Train
+Open Notebooks/model.ipynb and run all cells.
 
-**Hugging Face (recommended, no account needed):**
+Model saves to:
+Experiments/checkpoints/exp3/best_model.pt
 
-```python
-from huggingface_hub import snapshot_download
+## Run Backend
+cd backend
+uvicorn main:app --reload --port 8000
 
-snapshot_download(
-    repo_id="SahilSheth1/sroie-receipt-dataset",
-    repo_type="dataset",
-    local_dir="./sroie-receipt-dataset"
-)
-```
+## Results
+Vendor ~78%
+Date ~78%
+Total ~44%
+Address ~78%
 
-## Running the Notebook
-
-Once the dataset is in place, open and run `model.ipynb`:
+## Notes
+Dataset is not included per project requirements.

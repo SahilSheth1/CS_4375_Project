@@ -1,8 +1,3 @@
-"""
-Class-based confidence thresholding for ReceiptViT selective prediction.
-Import this in notebooks after creating a ConfidenceScorer.
-"""
-
 from __future__ import annotations
 
 import json
@@ -18,7 +13,13 @@ from field_vocab import FieldVocab, FIELDS
 from vit_model import ReceiptViT
 from data_loader import SROIEDataset, load_sroie_split, collate_fn
 from experiment_logger import log_experiment
-from conf_scoring_class import ConfidenceScorer, DATASET_BASE, DEFAULT_CKPT, DEFAULT_VOCAB, DEFAULT_TEMPS
+from conf_scoring_class import (
+    ConfidenceScorer,
+    DATASET_BASE,
+    DEFAULT_CKPT,
+    DEFAULT_VOCAB,
+    DEFAULT_TEMPS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_THRESH = REPO_ROOT / "Experiments" / "thresholds.json"
@@ -86,7 +87,9 @@ class ConfidenceThresholdManager:
                     best_t = float(t)
             return best_t
 
-        raise ValueError("mode must be 'target_precision', 'target_coverage', or 'max_f1'")
+        raise ValueError(
+            "mode must be 'target_precision', 'target_coverage', or 'max_f1'"
+        )
 
     def select_all_thresholds(
         self,
@@ -101,7 +104,9 @@ class ConfidenceThresholdManager:
         thresholds: dict[str, float] = {}
         for field in FIELDS:
             T = float(temperatures.get(field, 1.0))
-            conf, correct = self.scorer.conf_acc_from_logits(field_logits[field], field_labels[field], T=T)
+            conf, correct = self.scorer.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
             t = self.select_threshold(conf, correct, mode=mode, target=target)
             thresholds[field] = t
             print(f"  {field:8s}  t = {t:.4f}")
@@ -130,7 +135,9 @@ class ConfidenceThresholdManager:
             labels = list(payload["label"])
             confs = [float(c) for c in payload["confidence"]]
             abstain = [c < t for c in confs]
-            labels = [abstain_token if a else label for label, a in zip(labels, abstain)]
+            labels = [
+                abstain_token if a else label for label, a in zip(labels, abstain)
+            ]
             out[field] = {"label": labels, "confidence": confs, "abstained": abstain}
         return out
 
@@ -147,7 +154,9 @@ class ConfidenceThresholdManager:
 
         for field in FIELDS:
             T = float(temperatures.get(field, 1.0))
-            conf, correct = self.scorer.conf_acc_from_logits(field_logits[field], field_labels[field], T=T)
+            conf, correct = self.scorer.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
             N = conf.shape[0]
             t = float(thresholds.get(field, 0.0))
             retained = conf >= t
@@ -165,7 +174,11 @@ class ConfidenceThresholdManager:
             abstained_matrix.append(~retained)
 
         mean_review_rate = float(np.mean([per_field[f]["review_rate"] for f in FIELDS]))
-        any_abstained = np.any(np.stack(abstained_matrix, axis=0), axis=0) if abstained_matrix else np.array([])
+        any_abstained = (
+            np.any(np.stack(abstained_matrix, axis=0), axis=0)
+            if abstained_matrix
+            else np.array([])
+        )
         any_rate = float(any_abstained.mean()) if any_abstained.size > 0 else 0.0
 
         return {
@@ -181,19 +194,25 @@ class ConfidenceThresholdManager:
         extra_metrics: dict[str, Any] | None = None,
         log_path: str | Path = DEFAULT_LOG,
     ) -> None:
-        results: dict[str, Any] = {"review_rate": operating_point_dict.get("mean_review_rate")}
+        results: dict[str, Any] = {
+            "review_rate": operating_point_dict.get("mean_review_rate")
+        }
         if extra_metrics:
             results.update(extra_metrics)
         log_experiment(experiment_name, results, path=log_path)
 
     @staticmethod
     def print_operating_point(op: dict[str, Any]) -> None:
-        print(f"\n{'Field':10s}  {'precision':>10s}  {'coverage':>10s}  {'review':>10s}")
+        print(
+            f"\n{'Field':10s}  {'precision':>10s}  {'coverage':>10s}  {'review':>10s}"
+        )
         print("-" * 46)
         for field, metrics in op["per_field"].items():
             prec = metrics["precision_retained"]
             prec_str = f"{prec:10.4f}" if not np.isnan(prec) else f"{'n/a':>10s}"
-            print(f"{field:10s}  {prec_str}  {metrics['coverage']:10.4f}  {metrics['review_rate']:10.4f}")
+            print(
+                f"{field:10s}  {prec_str}  {metrics['coverage']:10.4f}  {metrics['review_rate']:10.4f}"
+            )
         print(f"\n  mean_review_rate   = {op['mean_review_rate']:.4f}")
         print(f"  any_abstained_rate = {op['any_abstained_rate']:.4f}")
 
@@ -206,12 +225,24 @@ class ThresholdDataModule:
         batch_size: int = 16,
         num_workers: int = 0,
     ) -> DataLoader:
-        test_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.Grayscale(num_output_channels=3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        test_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
         _, _, df_test = load_sroie_split(str(dataset_base))
-        test_dataset = SROIEDataset(df_test, base_path=str(dataset_base), transform=test_transform)
-        return DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
+        test_dataset = SROIEDataset(
+            df_test, base_path=str(dataset_base), transform=test_transform
+        )
+        return DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+        )

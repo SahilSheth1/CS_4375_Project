@@ -1,0 +1,54 @@
+{
+  "Exp2": {
+    "vendor": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "date": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "total": {
+      "exact_match": 0.519,
+      "f1": 0.519,
+      "n_samples": 919
+    },
+    "address": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "overall": {
+      "exact_match": 0.5965,
+      "f1": 0.5965
+    }
+  },
+  "Exp3": {
+    "vendor": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "date": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "total": {
+      "exact_match": 0.519,
+      "f1": 0.519,
+      "n_samples": 919
+    },
+    "address": {
+      "exact_match": 0.6224,
+      "f1": 0.6224,
+      "n_samples": 919
+    },
+    "overall": {
+      "exact_match": 0.5965,
+      "f1": 0.5965
+    }
+  }
+}

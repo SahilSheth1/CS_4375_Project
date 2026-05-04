@@ -1,4 +1,4 @@
 experiment_id,description,model_type,patch_size,num_layers,num_heads,learning_rate,train_test_split,exact_match_vendor,exact_match_date,exact_match_address,exact_match_total,f1_vendor,f1_date,f1_address,f1_total,overall_f1,review_rate,notes
-Exp2,ViT patch=16 layers=4 heads=4,ViT,16,4,4,3e-05,80/10/10,0.1111,0.0,0.0794,0.0317,0.2909,0.0,0.1866,0.0317,0.1273,,
-Exp3,ViT patch=16 layers=6 heads=8,ViT,16,6,8,3e-05,80/10/10,0.0794,0.0159,0.1587,0.0317,0.2728,0.0159,0.2314,0.0317,0.1379,,
-Exp1,Tesseract + Regex baseline,Tesseract+Regex,,,,,,,,,,,,,,,,
+Exp1,Tesseract + Regex baseline,Tesseract+Regex,,,,,N/A (test set only),,,,,,,,,,,
+Exp2,ViT patch=16 layers=4 heads=4,ViT,16,4,4,3e-05,80/10/10,0.6224,0.6224,0.6224,0.519,0.6224,0.6224,0.6224,0.519,0.5965,0.4831,
+Exp3,ViT patch=16 layers=6 heads=8,ViT,16,6,8,3e-05,80/10/10,0.6224,0.6224,0.6224,0.519,0.6224,0.6224,0.6224,0.519,0.5965,0.4831,

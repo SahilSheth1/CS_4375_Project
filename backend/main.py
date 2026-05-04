@@ -1,8 +1,3 @@
-"""
-main.py — FastAPI entry point
-Run with: uvicorn main:app --reload --port 8000
-"""
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,7 +9,6 @@ from routers import upload, review
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the model once at startup, release at shutdown."""
     (
         model_loader.model,
         model_loader.vocab,
@@ -25,8 +19,10 @@ async def lifespan(app: FastAPI):
     # Build a ConfidenceScorer and attach it to model_loader
     import sys
     from pathlib import Path
+
     sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
     from conf_scoring_class import ConfidenceScorer
+
     model_loader.scorer = ConfidenceScorer(
         model=model_loader.model,
         vocab=model_loader.vocab,
