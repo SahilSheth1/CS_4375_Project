@@ -1,0 +1,1966 @@
+model.ipynb:
+
+# Run for Clean Start
+
+import sys
+import shutil
+from pathlib import Path
+
+# Remove all cached modules
+for mod in list(sys.modules.keys()):
+    if any(
+        name in mod
+        for name in [
+            "data_loader",
+            "vit_model",
+            "field_vocab",
+            "trainer",
+            "conf_scoring",
+        ]
+    ):
+        del sys.modules[mod]
+
+# Delete all disk caches
+caches = [
+    "../Experiments/cord_img_cache",
+    "../Experiments/img_cache",
+    "../Experiments/vocab.json",
+    "../Experiments/checkpoints",
+    "../Experiments/temperatures.json",
+    "../Experiments/thresholds.json",
+    "../Experiments/review_queue.json",
+    "../Experiments/test_evaluation.json",
+]
+for path in caches:
+    p = Path(path)
+    if p.is_dir():
+        shutil.rmtree(p)
+        print(f"Deleted dir:  {p}")
+    elif p.exists():
+        p.unlink()
+        print(f"Deleted file: {p}")
+
+print("\n✓ All caches cleared")
+
+from src.data_setup import setup_all
+
+setup_all()
+
+# Cell 1
+
+import os
+import sys
+import json
+import importlib
+import numpy as np
+import pandas as pd
+from PIL import Image
+import matplotlib.pyplot as plt
+from pathlib import Path
+import torch
+
+# Cell 2
+
+BASE = "../sroie-receipt-dataset/SROIE2019"
+SPLITS = ["train", "test"]
+IMAGE_SIZE = 224
+PATCH_SIZE = 16
+IN_CHANNELS = 3
+EMBED_DIM = 256
+SEED = 42
+
+import sys
+
+sys.path.append("../src")
+
+import torch
+
+device_str = (
+    "mps"
+    if torch.backends.mps.is_available()
+    else "cuda" if torch.cuda.is_available() else "cpu"
+)
+device = torch.device(device_str)
+print(f"Device: {device}")
+
+# Cell 3
+
+# Build EDA dataframe (cached after first run)
+from PIL import Image
+
+CACHE = Path("../Experiments/eda_cache.pkl")
+
+if CACHE.exists():
+    import pickle
+
+    df = pickle.load(open(CACHE, "rb"))
+    print(f"Loaded cached dataframe ({len(df)} rows)")
+else:
+    records = []
+    for split in SPLITS:
+        img_dir = os.path.join(BASE, split, "img")
+        ent_dir = os.path.join(BASE, split, "entities")
+        images_list = sorted([f for f in os.listdir(img_dir) if f.endswith(".jpg")])
+        entity_files = sorted(os.listdir(ent_dir))
+        print(
+            f"\n{split.upper()}: {len(images_list)} images | {len(entity_files)} entity files"
+        )
+        for img_file in images_list:
+            stem = os.path.splitext(img_file)[0]
+            ent_path = os.path.join(ent_dir, stem + ".txt")
+            img = Image.open(os.path.join(img_dir, img_file))
+            w, h = img.size
+            fields = {"company": None, "date": None, "address": None, "total": None}
+            if os.path.exists(ent_path):
+                with open(ent_path, "r", encoding="utf-8", errors="ignore") as fh:
+                    try:
+                        data = json.load(fh)
+                        for key in fields:
+                            fields[key] = data.get(key) or None
+                    except json.JSONDecodeError:
+                        pass
+            records.append(
+                {"split": split, "file": img_file, "width": w, "height": h, **fields}
+            )
+    df = pd.DataFrame(records)
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    import pickle
+
+    pickle.dump(df, open(CACHE, "wb"))
+    print(f"\nBuilt and cached dataframe ({len(df)} rows)")
+
+print("Dataset shape:", df.shape)
+print(df.head(3))
+
+# Cell 4
+
+# EDA plots
+print("\nImage Dimensions")
+print(df[["width", "height"]].describe().round(1))
+
+fields_eda = ["company", "date", "address", "total"]
+completeness = df[fields_eda].notnull().mean() * 100
+print("\n── Field Completeness (%) ──")
+print(completeness.round(1))
+
+all_four = df[fields_eda].notnull().all(axis=1).sum()
+print(
+    f"\nReceipts with all 4 fields: {all_four} / {len(df)} ({100*all_four/len(df):.1f}%)"
+)
+
+# Cell 4B
+
+fig, ax = plt.subplots(figsize=(7, 5))
+ax.scatter(df["width"], df["height"], alpha=0.6)
+ax.set_title("Receipt Image Dimensions")
+ax.set_xlabel("Image Width (pixels)")
+ax.set_ylabel("Image Height (pixels)")
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(7, 5))
+completeness.sort_values().plot(kind="barh", ax=ax)
+ax.set_title("Field Completeness in Dataset")
+ax.set_xlabel("Completeness (%)")
+ax.set_ylabel("Field")
+ax.grid(True, axis="x", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Cell 5
+
+from sklearn.model_selection import train_test_split
+
+df_train_full = df[df["split"] == "train"].reset_index(drop=True)
+df_test = df[df["split"] == "test"].reset_index(drop=True)
+df_train, df_val = train_test_split(df_train_full, test_size=0.1, random_state=SEED)
+
+print(f"Train : {len(df_train)}")
+print(f"Val   : {len(df_val)}")
+print(f"Test  : {len(df_test)}")
+
+# Cell 6
+
+# Pre-cache resized val/test images to disk
+from torchvision import transforms
+from tqdm import tqdm
+
+CACHE_DIR = Path("../Experiments/img_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+transform = transforms.Compose(
+    [
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+# Only cache val and test
+cache_rows = pd.concat([df_val, df_test], ignore_index=True)
+skipped = 0
+for _, row in tqdm(cache_rows.iterrows(), total=len(cache_rows)):
+    out_path = CACHE_DIR / row["file"].replace(".jpg", ".pt")
+    if out_path.exists():
+        skipped += 1
+        continue
+    img_path = os.path.join(BASE, row["split"], "img", row["file"])
+    tensor = transform(Image.open(img_path).convert("RGB"))
+    torch.save(tensor, out_path)
+
+cached = len(cache_rows) - skipped
+print(f"{cached} cached, {skipped} already existed")
+print(f"Cache: {sum(f.stat().st_size for f in CACHE_DIR.glob('*.pt'))/1e6:.0f} MB")
+
+# Cell 7
+
+import data_loader, importlib
+
+importlib.reload(data_loader)
+from data_loader import get_dataloaders, collate_fn
+
+# CORD + WildReceipt
+train_loader, val_loader, test_loader = get_dataloaders(
+    BASE,
+    batch_size=64,
+    num_workers=4,
+    use_cord=True,
+    use_wildreceipt=True,
+    wildreceipt_path="../wildreceipt",
+)
+
+images, annotations = next(iter(train_loader))
+print(f"Batch shape : {images.shape}")
+print(f"num_workers : {train_loader.num_workers}")
+print(f"Train batches: {len(train_loader)}")
+print(f"Val batches: {len(val_loader)}")
+
+# Cell 8
+
+# Tesseract + Regex Baseline
+RESULTS_PATH = Path("../Experiments/experiment1_results.json")
+
+if RESULTS_PATH.exists():
+    with open(RESULTS_PATH) as f:
+        baseline_results = json.load(f)
+    print("Baseline already computed — skipping Tesseract run")
+    print("\nExperiment 1: Tesseract + Regex Baseline")
+    for field, metrics in baseline_results.items():
+        em = metrics.get("exact_match", "")
+        f1 = metrics.get("f1", "")
+        if isinstance(em, float):
+            print(f"{field.upper():10s}  Exact Match: {em:.3f}  F1: {f1:.3f}")
+else:
+    from baseline import run_baseline
+
+    test_samples = [
+        {
+            "image_path": os.path.join(BASE, row["split"], "img", row["file"]),
+            "annotation": {
+                k: row[k] or "" for k in ["company", "date", "address", "total"]
+            },
+        }
+        for _, row in df_test.iterrows()
+    ]
+    baseline_results = run_baseline(test_samples)
+    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(RESULTS_PATH, "w") as f:
+        json.dump(baseline_results, f, indent=2)
+    print("\nExperiment 1: Tesseract + Regex Baseline")
+    for field, metrics in baseline_results.items():
+        print(
+            f"{field.upper():10s}  Exact Match: {metrics['exact_match']:.3f}  F1: {metrics['f1']:.3f}"
+        )
+
+# Run only to remove caches
+
+import sys
+
+# Remove cached versions of both modules
+for mod in ["field_vocab", "vit_model"]:
+    if mod in sys.modules:
+        del sys.modules[mod]
+
+# Now re-import fresh
+import field_vocab
+import vit_model
+print("MAX_LEN_INT" in dir(field_vocab))
+
+# Cell 9
+
+# Smoke-test model components
+import vit_model
+
+importlib.reload(vit_model)
+from vit_model import (
+    PatchEmbedding,
+    LearnablePositionalEmbedding,
+    PatchAndPositionEmbedding,
+)
+
+patch_embed = PatchEmbedding(
+    image_size=IMAGE_SIZE,
+    patch_size=PATCH_SIZE,
+    in_channels=IN_CHANNELS,
+    embed_dim=EMBED_DIM,
+)
+print(patch_embed)
+print(f"num_patches: {patch_embed.num_patches}")
+
+sample_imgs, _ = next(iter(val_loader))
+B = sample_imgs.size(0)
+
+with torch.no_grad():
+    out = patch_embed(sample_imgs)
+assert out.shape == (B, patch_embed.num_patches, EMBED_DIM)
+
+embed_layer = PatchAndPositionEmbedding(
+    image_size=IMAGE_SIZE,
+    patch_size=PATCH_SIZE,
+    in_channels=IN_CHANNELS,
+    embed_dim=EMBED_DIM,
+)
+with torch.no_grad():
+    out2 = embed_layer(sample_imgs)
+assert out2.shape == (B, embed_layer.num_patches, EMBED_DIM)
+print("✓ PatchEmbedding and PatchAndPositionEmbedding correct")
+
+# Cell 10
+import field_vocab, importlib
+
+importlib.reload(field_vocab)
+from field_vocab import FieldVocab
+
+VOCAB_SAVE = Path("../Experiments/vocab.json")
+
+if VOCAB_SAVE.exists():
+    vocab = FieldVocab.load(str(VOCAB_SAVE))
+    print("Vocab loaded from disk — skipping rebuild")
+else:
+    vocab = FieldVocab.build(df_train)
+    VOCAB_SAVE.parent.mkdir(parents=True, exist_ok=True)
+    vocab.save(str(VOCAB_SAVE))
+    print("Vocab built and saved")
+
+for field in ["vendor", "date", "total", "address"]:
+    print(f"  {field:8s}  vocab size: {vocab.size(field):4d}")
+
+# Cell 11
+
+# Instantiate Exp2 and Exp3 models
+from vit_model import ReceiptViT
+
+model_exp2 = ReceiptViT(
+    vocab_sizes=vocab.vocab_sizes(),
+    image_size=IMAGE_SIZE,
+    patch_size=PATCH_SIZE,
+    in_channels=IN_CHANNELS,
+    embed_dim=EMBED_DIM,
+    num_layers=4,
+    num_heads=4,
+    dropout=0.1,
+)
+model_exp3 = ReceiptViT(
+    vocab_sizes=vocab.vocab_sizes(),
+    image_size=IMAGE_SIZE,
+    patch_size=PATCH_SIZE,
+    in_channels=IN_CHANNELS,
+    embed_dim=EMBED_DIM,
+    num_layers=6,
+    num_heads=8,
+    dropout=0.1,
+)
+
+total2 = sum(p.numel() for p in model_exp2.parameters() if p.requires_grad)
+total3 = sum(p.numel() for p in model_exp3.parameters() if p.requires_grad)
+print(f"Exp2 params: {total2:,}")
+print(f"Exp3 params: {total3:,}")
+
+# Cell 12
+
+# Train Experiment 2
+import trainer
+
+importlib.reload(trainer)
+from trainer import train_model
+
+CKPT_DIR2 = Path("../Experiments/checkpoints/exp2")
+CKPT_FILE2 = CKPT_DIR2 / "best_model.pt"
+
+if CKPT_FILE2.exists() and (CKPT_DIR2 / "results.json").exists():
+    results_exp2 = json.load(open(CKPT_DIR2 / "results.json"))
+    history_exp2 = (
+        json.load(open(CKPT_DIR2 / "history.json"))
+        if (CKPT_DIR2 / "history.json").exists()
+        else []
+    )
+    model_exp2.load_state_dict(torch.load(CKPT_FILE2, map_location=device_str))
+    model_exp2.to(device)
+    print("Exp2 checkpoint loaded")
+else:
+    results_exp2, history_exp2 = train_model(
+        model=model_exp2,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        vocab=vocab,
+        num_epochs=80,
+        lr=1e-5,
+        device_str=device_str,
+        checkpoint_dir=str(CKPT_DIR2),
+    )
+    CKPT_DIR2.mkdir(parents=True, exist_ok=True)
+    json.dump(results_exp2, open(CKPT_DIR2 / "results.json", "w"), indent=2)
+    json.dump(history_exp2, open(CKPT_DIR2 / "history.json", "w"), indent=2)
+
+print("Exp2 results:", results_exp2)
+
+# Cell 13
+
+# Train Experiment 3
+CKPT_DIR3 = Path("../Experiments/checkpoints/exp3")
+CKPT_FILE3 = CKPT_DIR3 / "best_model.pt"
+
+if CKPT_FILE3.exists() and (CKPT_DIR3 / "results.json").exists():
+    results_exp3 = json.load(open(CKPT_DIR3 / "results.json"))
+    history_exp3 = (
+        json.load(open(CKPT_DIR3 / "history.json"))
+        if (CKPT_DIR3 / "history.json").exists()
+        else []
+    )
+    model_exp3.load_state_dict(torch.load(CKPT_FILE3, map_location=device_str))
+    model_exp3.to(device)
+    print("Exp3 checkpoint loaded")
+else:
+    results_exp3, history_exp3 = train_model(
+        model=model_exp3,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        vocab=vocab,
+        num_epochs=80,
+        lr=1e-5,
+        device_str=device_str,
+        checkpoint_dir=str(CKPT_DIR3),
+    )
+    CKPT_DIR3.mkdir(parents=True, exist_ok=True)
+    json.dump(results_exp3, open(CKPT_DIR3 / "results.json", "w"), indent=2)
+    json.dump(history_exp3, open(CKPT_DIR3 / "history.json", "w"), indent=2)
+
+print("Exp3 results:", results_exp3)
+
+# Cell 14
+
+# Training curves
+for exp, history in [("Exp2", history_exp2), ("Exp3", history_exp3)]:
+    if not history:
+        print(f"{exp}: no history")
+        continue
+    df_hist = pd.DataFrame(history)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(df_hist["epoch"], df_hist["train_loss"], label="train")
+    axes[0].plot(df_hist["epoch"], df_hist["val_loss"], label="val")
+    axes[0].set_title(f"{exp} — Loss")
+    axes[0].legend()
+    axes[1].plot(df_hist["epoch"], df_hist["train_acc"], label="train")
+    axes[1].plot(df_hist["epoch"], df_hist["val_acc"], label="val")
+    axes[1].set_title(f"{exp} — Accuracy")
+    axes[1].legend()
+    plt.tight_layout()
+    plt.savefig(f"../Experiments/{exp}_curves.png", dpi=120)
+    plt.show()
+    print(f"\n{exp} final:", df_hist.iloc[-1].to_dict())
+
+# Cell 15
+from data_loader import get_dataloaders
+
+# temp var, won't overwrite train_loader
+_smoke_loader, _, _ = get_dataloaders(
+    BASE, batch_size=4
+)  
+
+images, annotations = next(iter(_smoke_loader))
+print(f"Input  shape : {images.shape}")
+
+with torch.no_grad():
+    embeddings = patch_embed(images)
+
+print(f"Output shape: {embeddings.shape}")
+assert embeddings.shape == (4, patch_embed.num_patches, EMBED_DIM), "Shape mismatch"
+print("\n✓ PatchEmbedding forward pass correct")
+
+# Cell 16
+
+from baseline import token_f1
+from field_vocab import FIELDS, _DF_COL, normalize_label
+
+
+def evaluate_token_f1(model, loader, vocab, device):
+    model = model.to(device)
+    model.eval()
+    field_f1 = {f: [] for f in FIELDS}
+    with torch.no_grad():
+        for images, annotations in loader:
+            images = images.to(device)
+            logits = model(images)
+            for f in FIELDS:
+                col = _DF_COL[f]
+                preds = logits[f].argmax(dim=-1).cpu().tolist()
+                for pred_idx, ann in zip(preds, annotations):
+                    pred_str = vocab.decode(f, pred_idx)
+                    gt_raw = ann.get(col, "") or ""
+                    gt_str = normalize_label(f, gt_raw)
+                    if pred_str == "<UNK>":
+                        field_f1[f].append(0.0)
+                    else:
+                        field_f1[f].append(token_f1(pred_str, gt_str))
+    return {f: round(sum(v) / len(v), 4) for f, v in field_f1.items()}
+
+
+print("Exp2 Token F1 (val)")
+f1_exp2 = evaluate_token_f1(model_exp2, val_loader, vocab, device)
+for f, s in f1_exp2.items():
+    print(f"  {f:8s}: {s:.4f}")
+
+print("\nExp3 Token F1 (val)")
+f1_exp3 = evaluate_token_f1(model_exp3, val_loader, vocab, device)
+for f, s in f1_exp3.items():
+    print(f"  {f:8s}: {s:.4f}")
+
+# Cell 16B
+
+f1_df = pd.DataFrame(
+    {
+        "Field": list(FIELDS),
+        "Exp2 Token F1": [f1_exp2[f] for f in FIELDS],
+        "Exp3 Token F1": [f1_exp3[f] for f in FIELDS],
+    }
+)
+
+ax = f1_df.set_index("Field").plot(kind="bar", figsize=(8, 5))
+ax.set_title("Validation Token F1 by Field")
+ax.set_xlabel("Field")
+ax.set_ylabel("Token F1 Score")
+ax.set_ylim(0, 1)
+ax.grid(True, axis="y", alpha=0.3)
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# Cell 17
+
+# Log experiment results
+from experiment_logger import log_experiment
+
+LOG_PATH = Path("../Experiments/experiment_log.csv")
+
+
+def already_logged(exp_id):
+    if not LOG_PATH.exists():
+        return False
+    return exp_id in pd.read_csv(LOG_PATH)["experiment_id"].values
+
+
+if not already_logged("Exp1"):
+    log_experiment(
+        "Exp1",
+        {
+            **baseline_results,
+            "description": "Tesseract + Regex baseline",
+            "model_type": "Tesseract+Regex",
+        },
+    )
+    print("Exp1 logged")
+else:
+    print("Exp1 already logged")
+
+if not already_logged("Exp2"):
+    log_experiment(
+        "Exp2",
+        {
+            **results_exp2,
+            "description": "ViT patch=16 layers=4 heads=4",
+            "model_type": "ViT",
+            "patch_size": 16,
+            "num_layers": 4,
+            "num_heads": 4,
+            "learning_rate": 3e-5,
+            **{f"f1_{f}": f1_exp2[f] for f in f1_exp2},
+            "overall_f1": round(sum(f1_exp2.values()) / len(f1_exp2), 4),
+        },
+    )
+    print("Exp2 logged")
+else:
+    print("Exp2 already logged")
+
+if not already_logged("Exp3"):
+    log_experiment(
+        "Exp3",
+        {
+            **results_exp3,
+            "description": "ViT patch=16 layers=6 heads=8",
+            "model_type": "ViT",
+            "patch_size": 16,
+            "num_layers": 6,
+            "num_heads": 8,
+            "learning_rate": 3e-5,
+            **{f"f1_{f}": f1_exp3[f] for f in f1_exp3},
+            "overall_f1": round(sum(f1_exp3.values()) / len(f1_exp3), 4),
+        },
+    )
+    print("Exp3 logged")
+else:
+    print("Exp3 already logged")
+
+# Cell 18
+
+from conf_scoring_class import ConfidenceScorer, ConfidenceDataModule
+from conf_thresholds_class import ConfidenceThresholdManager, ThresholdDataModule
+from review_queue import ReviewQueue, build_review_queue_from_loader
+
+REPO_ROOT = Path("..")
+CKPT_PATH = REPO_ROOT / "Experiments" / "checkpoints" / "exp2" / "best_model.pt"
+VOCAB_PATH = REPO_ROOT / "Experiments" / "vocab.json"
+TEMPS_PATH = REPO_ROOT / "Experiments" / "temperatures.json"
+THRESH_PATH = REPO_ROOT / "Experiments" / "thresholds.json"
+QUEUE_PATH = REPO_ROOT / "Experiments" / "review_queue.json"
+
+# Reuse already-loaded model_exp2
+model_conf = model_exp2
+model_conf.eval()
+print("model_conf ready on device:", next(model_conf.parameters()).device)
+
+# Cell 19
+
+val_loader_conf = val_loader
+test_loader_conf = test_loader
+print(f"val_loader_conf  batches: {len(val_loader_conf)}")
+print(f"test_loader_conf batches: {len(test_loader_conf)}")
+
+# Cell 20
+
+scorer = ConfidenceScorer(model=model_conf, vocab=vocab, device=device)
+
+if TEMPS_PATH.exists():
+    with open(TEMPS_PATH) as f:
+        temperatures = json.load(f)
+    print("Temperatures loaded from disk:", temperatures)
+else:
+    temperatures = scorer.fit_all_temperatures(val_loader_conf, save_path=TEMPS_PATH)
+    print("Temperatures fitted and saved:", temperatures)
+
+# Cell 20B
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+
+
+def collect_confidence_correctness(model, loader, vocab, scorer, temperatures, device):
+    all_data = {field: {"conf": [], "correct": []} for field in FIELDS}
+
+    model.eval()
+
+    with torch.no_grad():
+        for images, annotations in loader:
+            results = scorer.predict_with_confidence(images, temperatures=temperatures)
+
+            for field in FIELDS:
+                true_col = _DF_COL[field]
+
+                preds = results[field]["label"]
+                confs = results[field]["confidence"]
+
+                for pred, conf, ann in zip(preds, confs, annotations):
+                    true_text = normalize_label(field, ann.get(true_col, "") or "")
+                    is_correct = int(pred == true_text)
+
+                    all_data[field]["conf"].append(float(conf))
+                    all_data[field]["correct"].append(is_correct)
+
+    return all_data
+
+
+def plot_reliability_diagram(field, confs, corrects, bins=10):
+    confs = np.array(confs)
+    corrects = np.array(corrects)
+
+    bin_edges = np.linspace(0, 1, bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_width = 1.0 / bins
+
+    bin_acc = []
+    bin_conf = []
+    bin_counts = []
+
+    for i in range(bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask = (confs >= lo) & (confs < hi)
+
+        if i == bins - 1:
+            mask = (confs >= lo) & (confs <= hi)
+
+        if mask.sum() > 0:
+            bin_acc.append(corrects[mask].mean())
+            bin_conf.append(confs[mask].mean())
+            bin_counts.append(mask.sum())
+        else:
+            bin_acc.append(0)
+            bin_conf.append(bin_centers[i])
+            bin_counts.append(0)
+
+    bin_acc = np.array(bin_acc)
+    bin_conf = np.array(bin_conf)
+    bin_counts = np.array(bin_counts)
+
+    total = max(bin_counts.sum(), 1)
+    sample_pct = bin_counts / total
+
+    ece = np.sum((bin_counts / total) * np.abs(bin_acc - bin_conf))
+    avg_conf = confs.mean()
+    avg_acc = corrects.mean()
+
+    fig, axes = plt.subplots(2, 1, figsize=(6, 7), sharex=True)
+
+    # Top plot: confidence distribution
+    axes[0].bar(bin_centers, sample_pct, width=bin_width * 0.9, edgecolor="black")
+    axes[0].axvline(avg_conf, linestyle="--", linewidth=2, label="Avg. confidence")
+    axes[0].axvline(avg_acc, linestyle="-.", linewidth=2, label="Accuracy")
+    axes[0].set_title(f"{field.capitalize()} Reliability Diagram")
+    axes[0].set_ylabel("% of Samples")
+    axes[0].set_ylim(0, max(sample_pct.max() + 0.05, 0.1))
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Bottom plot: reliability bars
+    axes[1].plot([0, 1], [0, 1], linestyle="--", label="Perfect Calibration")
+    axes[1].bar(
+        bin_centers, bin_acc, width=bin_width * 0.9, edgecolor="black", label="Outputs"
+    )
+
+    gap = np.abs(bin_acc - bin_conf)
+    axes[1].bar(
+        bin_centers,
+        gap,
+        bottom=np.minimum(bin_acc, bin_conf),
+        width=bin_width * 0.9,
+        alpha=0.35,
+        edgecolor="black",
+        hatch="/",
+        label="Gap",
+    )
+
+    axes[1].set_xlabel("Confidence")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_xlim(0, 1)
+    axes[1].set_ylim(0, 1)
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    axes[1].text(
+        0.05,
+        0.08,
+        f"ECE={ece:.3f}",
+        fontsize=13,
+        bbox=dict(facecolor="white", alpha=0.8),
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
+calibration_data = collect_confidence_correctness(
+    model=model_conf,
+    loader=val_loader_conf,
+    vocab=vocab,
+    scorer=scorer,
+    temperatures=temperatures,
+    device=device,
+)
+
+for field in FIELDS:
+    plot_reliability_diagram(
+        field,
+        calibration_data[field]["conf"],
+        calibration_data[field]["correct"],
+        bins=10,
+    )
+
+# Cell 21
+
+from field_vocab import FIELDS
+import json
+
+thresholds = {
+    "vendor": 0.55,
+    "date": 0.55,
+    "total": 0.35,
+    "address": 0.45,
+}
+
+with open(THRESH_PATH, "w") as f:
+    json.dump(thresholds, f, indent=2)
+
+print("Thresholds:", thresholds)
+
+# Reload the confidence scoring and reviewer
+
+import sys
+import importlib
+
+sys.path.append("../src")
+
+import conf_scoring_class
+import review_queue
+
+importlib.reload(conf_scoring_class)
+importlib.reload(review_queue)
+
+from conf_scoring_class import ConfidenceScorer
+from review_queue import ReviewQueue, build_review_queue_from_loader
+
+scorer = ConfidenceScorer(model_conf, vocab, device)
+
+print("Reloaded confidence scorer and review queue")
+
+# Cell 22
+
+from pathlib import Path
+
+# Always rebuild queue while tuning thresholds
+if QUEUE_PATH.exists():
+    QUEUE_PATH.unlink()
+    print("Deleted old review queue")
+
+queue, row_records = build_review_queue_from_loader(
+    model=model_conf,
+    loader=test_loader_conf,
+    vocab=vocab,
+    scorer=scorer,
+    temperatures=temperatures,
+    thresholds=thresholds,
+    device=device,
+)
+
+queue.save(QUEUE_PATH)
+print("Review queue rebuilt and saved")
+
+summary = queue.summary()
+print("\nReview Queue Summary")
+for k, v in summary.items():
+    print(f"  {k}: {v}")
+
+# Cell 23
+
+# Review queue analysis
+df_records = pd.DataFrame(row_records)
+conf_cols = [c for c in df_records.columns if c.startswith("conf_")]
+flagged_df = df_records[~df_records["auto_accepted"]]
+accepted_df = df_records[df_records["auto_accepted"]]
+
+print(
+    f"Flagged for review: {len(flagged_df)} / {len(df_records)} ({queue.review_rate():.1%})"
+)
+print(f"Auto-accepted: {len(accepted_df)} / {len(df_records)}")
+
+print("\nMean confidence — FLAGGED")
+if len(flagged_df):
+    print(flagged_df[conf_cols].mean().round(3))
+
+print("\nMean confidence — ACCEPTED")
+if len(accepted_df):
+    print(accepted_df[conf_cols].mean().round(3))
+
+print("\nSample pending review")
+for r in queue.pending_review[:5]:
+    flagged_fields = [f for f, fr in r.fields.items() if fr.needs_review]
+    print(f"  {r.receipt_id} flagged: {flagged_fields}")
+
+# Cell 23B
+
+if len(df_records) > 0:
+    mean_conf = df_records[conf_cols].mean().sort_values()
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    mean_conf.plot(kind="barh", ax=ax)
+    ax.set_title("Mean Prediction Confidence by Field")
+    ax.set_xlabel("Mean Confidence")
+    ax.set_ylabel("Field")
+    ax.set_xlim(0, 1)
+    ax.grid(True, axis="x", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    review_counts = pd.Series(
+        {
+            "Auto-Accepted": len(accepted_df),
+            "Flagged for Review": len(flagged_df),
+        }
+    )
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    review_counts.plot(kind="bar", ax=ax)
+    ax.set_title("Review Queue Outcome Counts")
+    ax.set_xlabel("Review Status")
+    ax.set_ylabel("Number of Receipts")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+# Cell 24
+from field_vocab import normalize_label
+from baseline import token_f1
+
+
+def evaluate_test_set(model, loader, vocab, device, model_name):
+    model = model.to(device)
+    model.eval()
+
+    field_exact = {f: [] for f in FIELDS}
+    field_f1 = {f: [] for f in FIELDS}
+
+    with torch.no_grad():
+        for images, annotations in loader:
+            images = images.to(device)
+            logits = model(images)
+            for f in FIELDS:
+                col = _DF_COL[f]
+                preds = logits[f].argmax(dim=-1).cpu().tolist()
+                for pred_idx, ann in zip(preds, annotations):
+                    pred = vocab.decode(f, pred_idx)
+                    gt = normalize_label(f, ann.get(col, "") or "")
+                    if pred == "<UNK>":
+                        field_exact[f].append(0)
+                        field_f1[f].append(0.0)
+                    else:
+                        field_exact[f].append(int(pred == gt))
+                        field_f1[f].append(token_f1(pred, gt))
+
+    results = {}
+    for f in FIELDS:
+        results[f] = {
+            "exact_match": round(sum(field_exact[f]) / len(field_exact[f]), 4),
+            "f1": round(sum(field_f1[f]) / len(field_f1[f]), 4),
+            "n_samples": len(field_exact[f]),
+        }
+    overall_em = round(sum(r["exact_match"] for r in results.values()) / len(FIELDS), 4)
+    overall_f1 = round(sum(r["f1"] for r in results.values()) / len(FIELDS), 4)
+    results["overall"] = {"exact_match": overall_em, "f1": overall_f1}
+
+    print(f"\n{'─'*54}")
+    print(f"  {model_name} — Test Set Results")
+    print(f"{'─'*54}")
+    print(f"  {'Field':10s}  {'Exact Match':>11}  {'F1':>8}  {'N':>6}")
+    print(f"  {'─'*48}")
+    for f in FIELDS:
+        print(
+            f"  {f:10s}  {results[f]['exact_match']:>11.3f}  "
+            f"{results[f]['f1']:>8.3f}  {results[f]['n_samples']:>6}"
+        )
+    print(f"  {'─'*48}")
+    print(f"  {'overall':10s}  {overall_em:>11.3f}  {overall_f1:>8.3f}")
+    print(f"{'─'*54}")
+    return results
+
+
+print("evaluate_test_set() defined")
+
+# Cell 25 — Run test evaluation for both models
+EVAL_PATH = Path("../Experiments/test_evaluation.json")
+
+if EVAL_PATH.exists():
+    with open(EVAL_PATH) as f:
+        all_eval = json.load(f)
+    print("Evaluation already saved")
+    for model_name, results in all_eval.items():
+        print(f"\n{model_name}")
+        for field, metrics in results.items():
+            em = metrics.get("exact_match", "")
+            f1 = metrics.get("f1", "")
+            if isinstance(em, float):
+                print(f"  {field:10s}  EM: {em:.3f}  F1: {f1:.3f}")
+else:
+    all_eval = {}
+
+    print("Evaluating Exp2 (4 layers, 4 heads)...")
+    all_eval["Exp2"] = evaluate_test_set(
+        model=model_exp2,
+        loader=test_loader,
+        vocab=vocab,
+        device=device,
+        model_name="Exp2 (4L-4H)",
+    )
+
+    print("\nEvaluating Exp3 (6 layers, 8 heads)...")
+    all_eval["Exp3"] = evaluate_test_set(
+        model=model_exp3,
+        loader=test_loader,
+        vocab=vocab,
+        device=device,
+        model_name="Exp3 (6L-8H)",
+    )
+
+    EVAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(EVAL_PATH, "w") as f:
+        json.dump(all_eval, f, indent=2)
+    print(f"\nSaved to {EVAL_PATH}")
+
+# Cell 26
+print(f"\n{'─'*72}")
+print(
+    f"  {'Model':22s}  {'vendor EM':>9}  {'date EM':>7}  {'total EM':>8}  {'addr EM':>7}  {'Ovrl F1':>7}"
+)
+print(f"  {'─'*66}")
+
+# Tesseract baseline
+b = baseline_results
+rows = [
+    (
+        "Tesseract+Regex",
+        b.get("company", b.get("vendor", {})).get("exact_match", 0),
+        b.get("date", {}).get("exact_match", 0),
+        b.get("total", {}).get("exact_match", 0),
+        b.get("address", {}).get("exact_match", 0),
+        b.get("overall", {}).get("f1", 0),
+    ),
+]
+for model_name, results in all_eval.items():
+    rows.append(
+        (
+            model_name,
+            results.get("vendor", {}).get("exact_match", 0),
+            results.get("date", {}).get("exact_match", 0),
+            results.get("total", {}).get("exact_match", 0),
+            results.get("address", {}).get("exact_match", 0),
+            results.get("overall", {}).get("f1", 0),
+        )
+    )
+
+for name, v, d, t, a, f1 in rows:
+    print(f"  {name:22s}  {v:>9.3f}  {d:>7.3f}  {t:>8.3f}  {a:>7.3f}  {f1:>7.3f}")
+
+print(f"{'─'*72}")
+print(f"\nReview rate (test set): {queue.review_rate():.1%}")
+
+# Cell 26B
+
+plot_rows = []
+
+b = baseline_results
+plot_rows.append(
+    {
+        "Model": "Tesseract+Regex",
+        "vendor": b.get("company", b.get("vendor", {})).get("f1", 0),
+        "date": b.get("date", {}).get("f1", 0),
+        "total": b.get("total", {}).get("f1", 0),
+        "address": b.get("address", {}).get("f1", 0),
+    }
+)
+
+for model_name, results in all_eval.items():
+    plot_rows.append(
+        {
+            "Model": model_name,
+            "vendor": results.get("vendor", {}).get("f1", 0),
+            "date": results.get("date", {}).get("f1", 0),
+            "total": results.get("total", {}).get("f1", 0),
+            "address": results.get("address", {}).get("f1", 0),
+        }
+    )
+
+perf_df = pd.DataFrame(plot_rows)
+
+ax = perf_df.set_index("Model").plot(kind="bar", figsize=(10, 5))
+ax.set_title("Final Test Token F1 Comparison")
+ax.set_xlabel("Model")
+ax.set_ylabel("Token F1 Score")
+ax.set_ylim(0, 1)
+ax.grid(True, axis="y", alpha=0.3)
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# Cell 27
+import importlib, experiment_logger
+
+importlib.reload(experiment_logger)
+from experiment_logger import log_experiment
+
+log_experiment(
+    "Exp1",
+    {
+        **baseline_results,
+        "description": "Tesseract + Regex baseline",
+        "model_type": "Tesseract+Regex",
+        "train_test_split": "N/A (test set only)",
+    },
+)
+
+log_experiment(
+    "Exp2",
+    {
+        **results_exp2,
+        "description": "ViT patch=16 layers=4 heads=4",
+        "model_type": "ViT",
+        "patch_size": 16,
+        "num_layers": 4,
+        "num_heads": 4,
+        "learning_rate": 3e-5,
+        "train_test_split": "80/10/10",
+        "review_rate": round(queue.review_rate(), 4),
+        **{f"f1_{f}": all_eval["Exp2"][f]["f1"] for f in FIELDS},
+        **{f"exact_match_{f}": all_eval["Exp2"][f]["exact_match"] for f in FIELDS},
+        "overall_f1": all_eval["Exp2"]["overall"]["f1"],
+    },
+)
+
+log_experiment(
+    "Exp3",
+    {
+        **results_exp3,
+        "description": "ViT patch=16 layers=6 heads=8",
+        "model_type": "ViT",
+        "patch_size": 16,
+        "num_layers": 6,
+        "num_heads": 8,
+        "learning_rate": 3e-5,
+        "train_test_split": "80/10/10",
+        "review_rate": round(queue.review_rate(), 4),
+        **{f"f1_{f}": all_eval["Exp3"][f]["f1"] for f in FIELDS},
+        **{f"exact_match_{f}": all_eval["Exp3"][f]["exact_match"] for f in FIELDS},
+        "overall_f1": all_eval["Exp3"]["overall"]["f1"],
+    },
+)
+
+log_df = pd.read_csv("../Experiments/experiment_log.csv")
+print(
+    log_df[
+        [
+            "experiment_id",
+            "model_type",
+            "overall_f1",
+            "review_rate",
+            "exact_match_vendor",
+            "exact_match_date",
+            "exact_match_total",
+            "exact_match_address",
+        ]
+    ].to_string(index=False)
+)
+
+frontend/:
+
+api.js:
+
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: 'http://localhost:8000',
+  timeout: 30000,
+})
+
+export const uploadReceipt = (file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/upload/', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+export const getReviewQueue = () => api.get('/review/')
+
+export const getReceipt = (receiptId) => api.get(`/review/${receiptId}`)
+
+export const submitCorrection = (receiptId, corrections) =>
+  api.post(`/review/${receiptId}`, { corrections })
+
+export const getReviewStats = () => api.get('/review/stats/summary')
+
+components/:
+
+FieldCard.jsx:
+
+import { AlertTriangle, CheckCircle2 } from 'lucide-react'
+
+export default function FieldCard({ label, value, confidence, needsReview, index = 0 }) {
+  const pct = Math.round(confidence * 100)
+
+  const barColor = needsReview
+    ? '#EF4444'
+    : pct >= 85
+      ? '#2BBBAD'
+      : '#F59E0B'
+
+  const bgColor = needsReview ? '#FFF8F8' : '#FFFFFF'
+  const borderColor = needsReview ? '#FECACA' : '#E5E9F0'
+
+  return (
+    <div
+      className="rounded-xl border px-4 py-3 space-y-2 transition-all"
+      style={{
+        background: bgColor,
+        borderColor,
+        animation: `fadeUp 0.3s ease both`,
+        animationDelay: `${index * 60}ms`,
+      }}
+    >
+      <div className="flex items-center justify-between">
+        <span
+          className="text-xs font-semibold uppercase tracking-wider"
+          style={{ color: '#9CA3AF' }}
+        >
+          {label}
+        </span>
+        {needsReview ? (
+          <span
+            className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full"
+            style={{ background: '#FEE2E2', color: '#DC2626' }}
+          >
+            <AlertTriangle size={11} />
+            Review
+          </span>
+        ) : (
+          <span
+            className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full"
+            style={{ background: '#CCFBF1', color: '#0F766E' }}
+          >
+            <CheckCircle2 size={11} />
+            Accepted
+          </span>
+        )}
+      </div>
+
+      <p className="text-sm font-medium font-mono leading-snug break-all text-brand-text">
+        {value || <span style={{ color: '#D1D9E6' }}>—</span>}
+      </p>
+
+      <div className="space-y-1">
+        <div className="flex justify-between items-center">
+          <span className="text-xs" style={{ color: '#9CA3AF' }}>
+            Confidence
+          </span>
+          <span
+            className="text-xs font-semibold font-mono tabular-nums"
+            style={{ color: barColor }}
+          >
+            {pct}%
+          </span>
+        </div>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: '#F0F4FF' }}>
+          <div
+            className="h-full rounded-full"
+            style={{
+              width: `${pct}%`,
+              background: barColor,
+              animation: `growBar 0.6s ease both`,
+              animationDelay: `${index * 60 + 150}ms`,
+            }}
+          />
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes growBar {
+          from { width: 0%; }
+        }
+      `}</style>
+    </div>
+  )
+}
+
+ReviewCard.jsx
+
+import { useState } from 'react'
+import { AlertTriangle, Save, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
+import FieldCard from './FieldCard'
+
+const FIELD_LABELS = {
+  vendor: 'Vendor',
+  date: 'Date',
+  total: 'Total',
+  address: 'Address',
+}
+
+export default function ReviewCard({ item, onSave }) {
+  const flaggedFields = Object.entries(item.fields)
+    .filter(([, f]) => f.needs_review)
+    .map(([name]) => name)
+
+  const [edits, setEdits] = useState(
+    Object.fromEntries(flaggedFields.map(f => [f, item.fields[f].value]))
+  )
+  const [saving, setSaving] = useState(false)
+  const [expanded, setExpanded] = useState(true)
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave(item.receipt_id, edits)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border bg-white overflow-hidden"
+      style={{ borderColor: '#FECACA' }}>
+
+      {/* Card header */}
+      <div className="px-4 py-3 flex items-center justify-between border-b"
+        style={{ borderColor: '#FEE2E2', background: '#FFF7F7' }}>
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={14} style={{ color: '#EF4444' }} />
+          <span className="text-xs font-mono font-medium text-brand-text truncate max-w-xs">
+            {item.receipt_id}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+            style={{ background: '#FEE2E2', color: '#EF4444' }}>
+            {flaggedFields.length} field{flaggedFields.length !== 1 ? 's' : ''} flagged
+          </span>
+          <button onClick={() => setExpanded(e => !e)}
+            className="p-1 rounded hover:bg-red-50 transition"
+            style={{ color: '#9CA3AF' }}>
+            {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="p-4 space-y-4">
+
+          {/* All fields */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {Object.entries(item.fields).map(([field, data]) => (
+              data.needs_review ? (
+                <div key={field}
+                  className="rounded-lg border p-3 space-y-2"
+                  style={{ borderColor: '#FECACA', background: '#FFF7F7' }}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wide"
+                      style={{ color: '#6B7280' }}>
+                      {FIELD_LABELS[field] ?? field}
+                    </span>
+                    <span className="text-xs font-medium"
+                      style={{ color: '#EF4444' }}>
+                      {Math.round(data.confidence * 100)}% confidence
+                    </span>
+                  </div>
+                  <input
+                    value={edits[field] ?? ''}
+                    onChange={e => setEdits(prev => ({ ...prev, [field]: e.target.value }))}
+                    className="w-full text-sm font-mono rounded-md px-3 py-1.5 border outline-none transition"
+                    style={{
+                      borderColor: '#FECACA',
+                      background: '#FFFFFF',
+                      color: '#1F2937',
+                    }}
+                    onFocus={e => e.target.style.borderColor = '#2F80ED'}
+                    onBlur={e => e.target.style.borderColor = '#FECACA'}
+                  />
+                  <p className="text-xs" style={{ color: '#9CA3AF' }}>
+                    Model predicted: <span className="font-mono">{data.value || '—'}</span>
+                  </p>
+                </div>
+              ) : (
+                <FieldCard
+                  key={field}
+                  label={FIELD_LABELS[field] ?? field}
+                  value={data.value}
+                  confidence={data.confidence}
+                  needsReview={false}
+                />
+              )
+            ))}
+          </div>
+
+          {/* Save button */}
+          <div className="flex justify-end pt-1">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-all"
+              style={{
+                background: saving ? '#93C5FD' : '#2F80ED',
+                cursor: saving ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {saving
+                ? <><Loader2 size={14} className="animate-spin" /> Saving…</>
+                : <><Save size={14} /> Confirm & Save</>
+              }
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+StatsPill.jsx:
+
+export default function StatsPill({ label, value, color }) {
+  return (
+    <div className="flex items-center gap-3 bg-white rounded-xl border border-brand-border px-4 py-3 min-w-[120px]">
+      <div className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+      <div>
+        <p className="text-xs" style={{ color: '#9CA3AF' }}>{label}</p>
+        <p className="text-sm font-semibold text-brand-text">{value}</p>
+      </div>
+    </div>
+  )
+}
+
+StatusBadge.jsx:
+
+import { CheckCircle2, Clock } from 'lucide-react'
+
+export default function StatusBadge({ autoAccepted }) {
+  return autoAccepted ? (
+    <span className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full"
+      style={{ background: '#D1FAF8', color: '#0F9D93' }}>
+      <CheckCircle2 size={12} />
+      Auto-accepted
+    </span>
+  ) : (
+    <span className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1 rounded-full"
+      style={{ background: '#FEF3C7', color: '#D97706' }}>
+      <Clock size={12} />
+      Needs review
+    </span>
+  )
+}
+
+pages/:
+
+ReviewPage.jsx:
+
+import { useState, useEffect, useCallback } from 'react'
+import {
+  ClipboardCheck, RefreshCw, Loader2,
+  AlertCircle, CheckCircle2, Inbox
+} from 'lucide-react'
+import { getReviewQueue, getReviewStats, submitCorrection } from '../api'
+import ReviewCard from '../components/ReviewCard'
+import StatsPill from '../components/StatsPill'
+
+export default function ReviewPage() {
+  const [items, setItems] = useState([])
+  const [stats, setStats] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  // { receipt_id: true } after correction
+  const [saved, setSaved] = useState({})
+
+  const fetchQueue = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [qRes, sRes] = await Promise.all([getReviewQueue(), getReviewStats()])
+      setItems(qRes.data.items)
+      setStats(sRes.data)
+    } catch {
+      setError('Could not load review queue. Is the backend running?')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchQueue() }, [fetchQueue])
+
+  const handleSave = async (receiptId, corrections) => {
+    await submitCorrection(receiptId, corrections)
+    setSaved(prev => ({ ...prev, [receiptId]: true }))
+    // Refresh stats after correction
+    const sRes = await getReviewStats()
+    setStats(sRes.data)
+  }
+
+  const pendingCount = items.filter(i => !saved[i.receipt_id]).length
+
+  return (
+    <div className="space-y-6">
+
+      {/* Page title */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-brand-text">Review Queue</h1>
+          <p className="text-sm mt-0.5" style={{ color: '#6B7280' }}>
+            Receipts where one or more fields fell below the confidence threshold.
+          </p>
+        </div>
+        <button
+          onClick={fetchQueue}
+          disabled={loading}
+          className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg border border-brand-border bg-white hover:bg-slate-50 transition"
+          style={{ color: '#6B7280' }}
+        >
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+      </div>
+
+      {/* Stats row */}
+      {stats && (
+        <div className="flex flex-wrap gap-3 fade-up">
+          <StatsPill
+            label="Total Processed"
+            value={stats.total_processed}
+            color="#2F80ED"
+          />
+          <StatsPill
+            label="Auto-accepted"
+            value={stats.auto_accepted}
+            color="#2BBBAD"
+          />
+          <StatsPill
+            label="Pending Review"
+            value={stats.pending_review}
+            color="#F59E0B"
+          />
+          <StatsPill
+            label="Review Rate"
+            value={`${(stats.review_rate * 100).toFixed(1)}%`}
+            color="#8B5CF6"
+          />
+          <StatsPill
+            label="Human Reviewed"
+            value={stats.human_reviewed}
+            color="#10B981"
+          />
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm"
+          style={{ background: '#FEF2F2', color: '#DC2626' }}>
+          <AlertCircle size={15} className="shrink-0" />
+          {error}
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading && (
+        <div className="flex flex-col items-center justify-center gap-3 py-24">
+          <Loader2 size={28} className="animate-spin" style={{ color: '#2F80ED' }} />
+          <p className="text-xs" style={{ color: '#9CA3AF' }}>Loading queue…</p>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!loading && !error && items.length === 0 && (
+        <div className="flex flex-col items-center justify-center gap-3 py-24 rounded-xl border border-dashed border-brand-border bg-white">
+          <Inbox size={32} style={{ color: '#D1D9E6' }} />
+          <p className="text-sm font-medium text-brand-text">Queue is empty</p>
+          <p className="text-xs" style={{ color: '#9CA3AF' }}>
+            All receipts have been auto-accepted or reviewed.
+          </p>
+        </div>
+      )}
+
+      {/* Review cards */}
+      {!loading && items.length > 0 && (
+        <div className="space-y-4">
+          {/* Pending */}
+          {items.filter(i => !saved[i.receipt_id]).length > 0 && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide"
+                style={{ color: '#6B7280' }}>
+                Pending · {pendingCount}
+              </p>
+              {items
+                .filter(i => !saved[i.receipt_id])
+                .map((item, idx) => (
+                  <div key={item.receipt_id}
+                    className={`fade-up fade-up-delay-${Math.min(idx + 1, 4)}`}>
+                    <ReviewCard
+                      item={item}
+                      onSave={handleSave}
+                    />
+                  </div>
+                ))}
+            </div>
+          )}
+
+          {/* Confirmed */}
+          {Object.keys(saved).length > 0 && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide"
+                style={{ color: '#2BBBAD' }}>
+                Confirmed · {Object.keys(saved).length}
+              </p>
+              {items
+                .filter(i => saved[i.receipt_id])
+                .map(item => (
+                  <div key={item.receipt_id}
+                    className="rounded-xl border bg-white px-4 py-3 flex items-center gap-3"
+                    style={{ borderColor: '#A7F3D0' }}>
+                    <CheckCircle2 size={16} style={{ color: '#10B981' }} />
+                    <span className="text-sm font-mono text-brand-text flex-1 truncate">
+                      {item.receipt_id}
+                    </span>
+                    <span className="text-xs" style={{ color: '#6B7280' }}>
+                      Confirmed
+                    </span>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+UploadPage.jsx:
+
+import { useState, useRef, useCallback } from 'react'
+import {
+  UploadCloud, FileImage, X, Loader2, ChevronRight, AlertCircle
+} from 'lucide-react'
+import { uploadReceipt } from '../api'
+import FieldCard from '../components/FieldCard'
+import StatusBadge from '../components/StatusBadge'
+
+const FIELD_LABELS = {
+  vendor: 'Vendor',
+  date: 'Date',
+  total: 'Total',
+  address: 'Address',
+}
+
+// Fields that need review get floated to the top so the user sees them first
+function sortedFields(fields) {
+  return Object.entries(fields).sort(([, a], [, b]) => {
+    if (a.needs_review && !b.needs_review) return -1
+    if (!a.needs_review && b.needs_review) return 1
+    // lower confidence first within each group
+    return a.confidence - b.confidence
+  })
+}
+
+function OverallConfidence({ fields }) {
+  const values = Object.values(fields)
+  const avg = values.reduce((s, f) => s + f.confidence, 0) / values.length
+  const pct = Math.round(avg * 100)
+  const flagged = values.filter(f => f.needs_review).length
+  const color = flagged > 0 ? '#D97706' : '#0F766E'
+  const bgColor = flagged > 0 ? '#FEF3C7' : '#CCFBF1'
+
+  return (
+    <div
+      className="rounded-xl border px-4 py-3 flex items-center justify-between"
+      style={{ background: bgColor, borderColor: flagged > 0 ? '#FDE68A' : '#99F6E4' }}
+    >
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wider" style={{ color }}>
+          Overall Confidence
+        </p>
+        <p className="text-lg font-bold font-mono mt-0.5" style={{ color }}>
+          {pct}%
+        </p>
+      </div>
+      <div className="text-right">
+        <p className="text-xs" style={{ color }}>
+          {flagged === 0
+            ? 'All fields accepted'
+            : `${flagged} field${flagged > 1 ? 's' : ''} flagged`}
+        </p>
+        <p className="text-xs mt-0.5 font-mono" style={{ color: '#9CA3AF' }}>
+          {values.length} fields extracted
+        </p>
+      </div>
+    </div>
+  )
+}
+
+export default function UploadPage() {
+  const [file, setFile] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const [dragging, setDragging] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
+  const inputRef = useRef()
+
+  const handleFile = (f) => {
+    if (!f) return
+    if (!['image/jpeg', 'image/png', 'image/jpg'].includes(f.type)) {
+      setError('Please upload a JPEG or PNG image.')
+      return
+    }
+    setFile(f)
+    setPreview(URL.createObjectURL(f))
+    setResult(null)
+    setError(null)
+  }
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault()
+    setDragging(false)
+    handleFile(e.dataTransfer.files[0])
+  }, [])
+
+  const clearFile = () => {
+    setFile(null)
+    setPreview(null)
+    setResult(null)
+    setError(null)
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  const handleUpload = async () => {
+    if (!file) return
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await uploadReceipt(file)
+      setResult(res.data)
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+        'Could not connect to the API. Is the backend running?'
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+
+      <div>
+        <h1 className="text-xl font-semibold text-brand-text">Upload Receipt</h1>
+        <p className="text-sm mt-0.5" style={{ color: '#6B7280' }}>
+          Upload a receipt image and the model will extract key fields automatically.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        {/* Left: drop zone */}
+        <div className="space-y-4">
+          {!file ? (
+            <div
+              onDrop={onDrop}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+              onDragLeave={() => setDragging(false)}
+              onClick={() => inputRef.current?.click()}
+              className="cursor-pointer rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center gap-3 py-16 px-8 text-center"
+              style={{
+                borderColor: dragging ? '#2F80ED' : '#D1D9E6',
+                background: dragging ? '#EBF4FF' : '#FFFFFF',
+              }}
+            >
+              <div
+                className="rounded-full p-4"
+                style={{ background: dragging ? '#DBEAFE' : '#F0F4FF' }}
+              >
+                <UploadCloud size={28} style={{ color: '#2F80ED' }} />
+              </div>
+              <div>
+                <p className="font-medium text-brand-text text-sm">
+                  {dragging ? 'Drop it here' : 'Drag & drop your receipt'}
+                </p>
+                <p className="text-xs mt-1" style={{ color: '#9CA3AF' }}>
+                  or click to browse · JPEG, PNG
+                </p>
+              </div>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="image/jpeg,image/png"
+                className="hidden"
+                onChange={(e) => handleFile(e.target.files[0])}
+              />
+            </div>
+          ) : (
+            <div className="rounded-xl overflow-hidden border border-brand-border bg-white shadow-sm">
+              <div className="relative">
+                <img
+                  src={preview}
+                  alt="Receipt preview"
+                  className="w-full object-contain max-h-72"
+                />
+                <button
+                  onClick={clearFile}
+                  className="absolute top-2 right-2 rounded-full p-1 bg-white shadow border border-brand-border hover:bg-slate-50 transition"
+                >
+                  <X size={14} style={{ color: '#6B7280' }} />
+                </button>
+              </div>
+              <div className="px-4 py-3 flex items-center gap-2 border-t border-brand-border">
+                <FileImage size={15} style={{ color: '#2F80ED' }} />
+                <span className="text-xs font-medium text-brand-text truncate flex-1">
+                  {file.name}
+                </span>
+                <span className="text-xs" style={{ color: '#9CA3AF' }}>
+                  {(file.size / 1024).toFixed(0)} KB
+                </span>
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div
+              className="flex items-start gap-2 rounded-lg px-4 py-3 text-sm"
+              style={{ background: '#FEF2F2', color: '#DC2626' }}
+            >
+              <AlertCircle size={15} className="mt-0.5 shrink-0" />
+              {error}
+            </div>
+          )}
+
+          <button
+            onClick={handleUpload}
+            disabled={!file || loading}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium text-white transition-all"
+            style={{
+              background: !file || loading ? '#93C5FD' : '#2F80ED',
+              cursor: !file || loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading
+              ? <><Loader2 size={15} className="animate-spin" /> Analysing…</>
+              : <><ChevronRight size={15} /> Extract Fields</>
+            }
+          </button>
+        </div>
+
+        {/* Right: results */}
+        <div className="space-y-3">
+
+          {/* Empty state */}
+          {!result && !loading && (
+            <div
+              className="h-full flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-brand-border py-16"
+              style={{ background: '#FFFFFF' }}
+            >
+              <FileImage size={28} style={{ color: '#D1D9E6' }} />
+              <p className="text-xs" style={{ color: '#9CA3AF' }}>
+                Extracted fields will appear here
+              </p>
+            </div>
+          )}
+
+          {/* Loading state */}
+          {loading && (
+            <div className="h-full flex flex-col items-center justify-center gap-3 rounded-xl border border-brand-border py-16 bg-white">
+              <Loader2 size={28} className="animate-spin" style={{ color: '#2F80ED' }} />
+              <p className="text-xs" style={{ color: '#6B7280' }}>Running model…</p>
+            </div>
+          )}
+
+          {/* Results */}
+          {result && (
+            <div className="space-y-3">
+
+              {/* Receipt ID + status */}
+              <div
+                className="flex items-center justify-between rounded-xl px-4 py-3 bg-white border border-brand-border"
+                style={{ animation: 'fadeUp 0.25s ease both' }}
+              >
+                <div>
+                  <p className="text-xs font-medium" style={{ color: '#6B7280' }}>
+                    Receipt ID
+                  </p>
+                  <p className="text-xs font-mono mt-0.5 text-brand-text">
+                    {result.receipt_id}
+                  </p>
+                </div>
+                <StatusBadge autoAccepted={result.auto_accepted} />
+              </div>
+
+              {/* Overall confidence summary */}
+              <div style={{ animation: 'fadeUp 0.25s ease both', animationDelay: '60ms' }}>
+                <OverallConfidence fields={result.fields} />
+              </div>
+
+              {/* Field cards */}
+              {sortedFields(result.fields).map(([field, data], i) => (
+                <FieldCard
+                  key={field}
+                  label={FIELD_LABELS[field] ?? field}
+                  value={data.value}
+                  confidence={data.confidence}
+                  needsReview={data.needs_review}
+                  index={i}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+    </div>
+  )
+}
+
+App.jsx:
+
+import { useState } from 'react'
+import { ScanLine, Upload, ClipboardCheck } from 'lucide-react'
+import UploadPage from './pages/UploadPage'
+import ReviewPage from './pages/ReviewPage'
+
+const NAV = [
+  { id: 'upload', label: 'Upload', icon: Upload },
+  { id: 'review', label: 'Review', icon: ClipboardCheck },
+]
+
+export default function App() {
+  const [page, setPage] = useState('upload')
+
+  return (
+    <div className="min-h-screen flex flex-col" style={{ background: '#F7F9FC' }}>
+      <header className="bg-white border-b border-brand-border sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ScanLine size={20} style={{ color: '#2F80ED' }} />
+            <span className="font-semibold text-brand-text tracking-tight">
+              ReceiptAI
+            </span>
+          </div>
+          <nav className="flex gap-1">
+            {NAV.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setPage(id)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+                style={page === id
+                  ? { background: '#EBF4FF', color: '#2F80ED' }
+                  : { color: '#6B7280' }
+                }
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-4xl w-full mx-auto px-6 py-8">
+        {page === 'upload' ? <UploadPage /> : <ReviewPage />}
+      </main>
+
+      <footer className="py-4 text-center text-xs" style={{ color: '#9CA3AF' }}>
+        ReceiptAI · CS 4375
+      </footer>
+    </div>
+  )
+}
+
