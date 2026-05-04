@@ -1964,3 +1964,3057 @@ export default function App() {
   )
 }
 
+src/:
+
+baseline.py:
+
+import os
+import re
+import json
+import pytesseract
+from PIL import Image
+
+# TESSERACT OCR
+
+
+def run_ocr(image_path: str) -> str:
+    image = Image.open(image_path).convert("RGB")
+    custom_config = r"--oem 3 --psm 6"
+    raw_text = pytesseract.image_to_string(image, config=custom_config)
+    return raw_text
+
+
+# REGEX FIELD EXTRACTION
+
+
+def extract_fields(raw_text: str) -> dict:
+    lines = [l.strip() for l in raw_text.strip().splitlines() if l.strip()]
+
+    extracted = {"company": "", "date": "", "address": "", "total": ""}
+
+    # Heuristic: company name is typically the first non-empty line,
+    # short, often all-caps, at the top of the receipt
+    if lines:
+        extracted["company"] = lines[0]
+
+    # Matches common formats found on Malaysian receipts in SROIE:
+    #   DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    #   YYYY/MM/DD, YYYY-MM-DD
+    #   DD MON YYYY (e.g. 12 JAN 2018)
+    date_pattern = re.compile(
+        r"""
+        \b(
+            \d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}
+            |
+            \d{4}[\/\-\.]\d{2}[\/\-\.]\d{2}
+            |
+            \d{1,2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|
+                         JUL|AUG|SEP|OCT|NOV|DEC)
+                         \s+\d{2,4}
+        )\b
+        """,
+        re.VERBOSE | re.IGNORECASE,
+    )
+    date_match = date_pattern.search(raw_text)
+    if date_match:
+        extracted["date"] = date_match.group(0).strip()
+
+    # Look for keyword (TOTAL, AMOUNT, etc.) followed by a currency amount
+    total_pattern = re.compile(
+        r"""
+        (?:TOTAL|GRAND\s*TOTAL|AMOUNT\s*DUE|AMOUNT|CASH|BALANCE)
+        [^\d]{0,20}
+        (RM\s?)?
+        (\d{1,6}[.,]\d{2})
+        """,
+        re.VERBOSE | re.IGNORECASE,
+    )
+    total_match = total_pattern.search(raw_text)
+    if total_match:
+        currency = total_match.group(1) or ""
+        amount = total_match.group(2)
+        extracted["total"] = (currency + amount).strip()
+
+    # Look for lines containing street keywords or postal codes appearing after the company line and before the date/total
+    address_keywords = re.compile(
+        r"\b(JALAN|JLN|LORONG|LRG|STREET|ST|AVENUE|AVE|ROAD|RD|"
+        r"TAMAN|BANDAR|NO\.|BLOCK|BLK|FLOOR|LEVEL|MALL|PLAZA|"
+        r"\d{5})\b",
+        re.IGNORECASE,
+    )
+    address_lines = []
+    for line in lines[1:]:  # skip company (line 0)
+        if address_keywords.search(line):
+            address_lines.append(line)
+        if date_pattern.search(line) or total_pattern.search(line):
+            break
+    extracted["address"] = ", ".join(address_lines)
+
+    return extracted
+
+
+# NORMALIZATION
+
+
+def normalize(value: str) -> str:
+    value = value.lower().strip()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[^\w\s\.\,\/\-]", "", value)
+    return value
+
+
+# TOKEN-LEVEL F1
+
+
+def token_f1(prediction: str, ground_truth: str) -> float:
+    pred_tokens = normalize(prediction).split()
+    gt_tokens = normalize(ground_truth).split()
+
+    if not pred_tokens and not gt_tokens:
+        return 1.0
+    if not pred_tokens or not gt_tokens:
+        return 0.0
+
+    pred_counts = {}
+    for t in pred_tokens:
+        pred_counts[t] = pred_counts.get(t, 0) + 1
+
+    gt_counts = {}
+    for t in gt_tokens:
+        gt_counts[t] = gt_counts.get(t, 0) + 1
+
+    overlap = sum(min(gt_counts[t], pred_counts.get(t, 0)) for t in gt_counts)
+
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gt_tokens)
+
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+# EVALUATION
+
+
+def evaluate(predictions: list, ground_truths: list) -> dict:
+    fields = ["company", "date", "address", "total"]
+    results = {}
+
+    for field in fields:
+        exact_matches = []
+        f1_scores = []
+
+        for pred, gt in zip(predictions, ground_truths):
+            pred_val = normalize(pred.get(field, ""))
+            gt_val = normalize(gt.get(field, ""))
+
+            exact_matches.append(1 if pred_val == gt_val else 0)
+            f1_scores.append(token_f1(pred_val, gt_val))
+
+        results[field] = {
+            "exact_match": sum(exact_matches) / len(exact_matches),
+            "f1": sum(f1_scores) / len(f1_scores),
+        }
+
+    # Overall averages across all 4 fields
+    results["overall"] = {
+        "exact_match": sum(results[f]["exact_match"] for f in fields) / len(fields),
+        "f1": sum(results[f]["f1"] for f in fields) / len(fields),
+    }
+
+    return results
+
+
+# MAIN PIPELINE
+
+
+def run_baseline(data_split: list) -> dict:
+    predictions = []
+    ground_truths = []
+
+    for i, sample in enumerate(data_split):
+        print(
+            f"Processing {i+1}/{len(data_split)}: {os.path.basename(sample['image_path'])}"
+        )
+
+        raw_text = run_ocr(sample["image_path"])
+        pred = extract_fields(raw_text)
+
+        predictions.append(pred)
+        ground_truths.append(sample["annotation"])
+
+    return evaluate(predictions, ground_truths)
+
+conf_scoring_class.py:
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+from torchvision import transforms
+
+from vit_model import ReceiptViT
+from field_vocab import FieldVocab, FIELDS, _DF_COL
+from data_loader import SROIEDataset, load_sroie_split, collate_fn
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CKPT = REPO_ROOT / "Experiments" / "checkpoints" / "exp2" / "best_model.pt"
+DEFAULT_VOCAB = REPO_ROOT / "Experiments" / "vocab.json"
+DEFAULT_TEMPS = REPO_ROOT / "Experiments" / "temperatures.json"
+DEFAULT_PLOTS = REPO_ROOT / "Experiments" / "calibration_plots"
+DATASET_BASE = REPO_ROOT / "sroie-receipt-dataset" / "SROIE2019"
+
+
+class ConfidenceScorer:
+    def __init__(
+        self, model: ReceiptViT, vocab: FieldVocab, device: torch.device | str
+    ):
+        self.model = model
+        self.vocab = vocab
+        self.device = torch.device(device)
+        self.model.to(self.device)
+        self.model.eval()
+
+    @torch.no_grad()
+    def predict_with_confidence(
+        self,
+        images: torch.Tensor,
+        temperatures: dict[str, float] | None = None,
+    ) -> dict[str, dict[str, list]]:
+        images = images.to(self.device)
+        logits_dict = self.model(images)
+
+        out: dict[str, dict[str, list]] = {}
+
+        for field, logits in logits_dict.items():
+            T = float((temperatures or {}).get(field, 1.0))
+            T = max(T, 1e-3)
+
+            probs = torch.softmax(logits / T, dim=-1)
+
+            # conf shape: batch_size, max_len
+            # idx shape: batch_size, max_len
+            conf, idx = probs.max(dim=-1)
+
+            idx_batch = idx.detach().cpu().tolist()
+            conf_batch = conf.detach().cpu().tolist()
+
+            labels = []
+            confidences = []
+
+            for seq, seq_conf in zip(idx_batch, conf_batch):
+                text = self.vocab.decode(field, seq)
+                labels.append(text)
+
+                # Non-PAD confidence if prediction has characters
+                non_pad_confs = [c for token, c in zip(seq, seq_conf) if token != 1]
+
+                if len(non_pad_confs) > 0:
+                    field_conf = sum(non_pad_confs) / len(non_pad_confs)
+                else:
+                    # If model predicts all PAD/blank, still use its confidence instead of incorrectly forcing confidence to 0.0
+                    field_conf = sum(seq_conf) / len(seq_conf)
+
+                confidences.append(float(field_conf))
+
+            out[field] = {
+                "label": labels,
+                "confidence": confidences,
+            }
+
+        return out
+
+    def collect_logits_labels(
+        self,
+        loader: DataLoader,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        self.model.eval()
+        field_logits: dict[str, list[torch.Tensor]] = {f: [] for f in FIELDS}
+        field_labels: dict[str, list[torch.Tensor]] = {f: [] for f in FIELDS}
+
+        with torch.no_grad():
+            for images, annotations in loader:
+                images = images.to(self.device)
+                logits = self.model(images)
+                for field in FIELDS:
+                    col = _DF_COL[field]
+                    indices = [
+                        self.vocab.encode(field, ann.get(col, ""))
+                        for ann in annotations
+                    ]
+                    field_logits[field].append(logits[field].detach().cpu())
+                    field_labels[field].append(torch.tensor(indices, dtype=torch.long))
+
+        return (
+            {f: torch.cat(field_logits[f], dim=0) for f in FIELDS},
+            {f: torch.cat(field_labels[f], dim=0) for f in FIELDS},
+        )
+
+    @staticmethod
+    def fit_temperature(
+        logits_val: torch.Tensor, labels_val: torch.Tensor, max_iter: int = 100
+    ) -> float:
+        logits_val = logits_val.detach().cpu()  # (B, max_len, vocab_size)
+        labels_val = labels_val.detach().cpu().long()  # (B, max_len)
+
+        T = nn.Parameter(torch.ones(1))
+        nll = nn.CrossEntropyLoss(ignore_index=1)  # 1 = PAD_IDX
+        opt = torch.optim.LBFGS([T], lr=0.01, max_iter=max_iter)
+
+        def closure():
+            opt.zero_grad()
+            # CE expects (B, vocab_size, max_len)
+            loss = nll(logits_val.permute(0, 2, 1) / T.clamp(min=1e-3), labels_val)
+            loss.backward()
+            return loss
+
+        opt.step(closure)
+        return float(T.detach().clamp(min=1e-3).item())
+
+    def fit_all_temperatures(
+        self,
+        val_loader: DataLoader,
+        save_path: str | Path | None = DEFAULT_TEMPS,
+    ) -> dict[str, float]:
+        field_logits, field_labels = self.collect_logits_labels(val_loader)
+
+        temperatures: dict[str, float] = {}
+        for field in FIELDS:
+            T = self.fit_temperature(field_logits[field], field_labels[field])
+            temperatures[field] = T
+            print(f"  {field:8s}  T = {T:.4f}")
+
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "w") as fh:
+                json.dump(temperatures, fh, indent=2)
+            print(f"✓ Temperatures saved to {save_path}")
+
+        return temperatures
+
+    @staticmethod
+    def compute_ece(
+        confidences: np.ndarray, accuracies: np.ndarray, n_bins: int = 10
+    ) -> float:
+        confidences = np.asarray(confidences, dtype=np.float64).reshape(-1)
+        accuracies = np.asarray(accuracies, dtype=np.float64).reshape(-1)
+        n = confidences.shape[0]
+        if n == 0:
+            return 0.0
+
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        for i in range(n_bins):
+            lo, hi = edges[i], edges[i + 1]
+            if i == n_bins - 1:
+                mask = (confidences >= lo) & (confidences <= hi)
+            else:
+                mask = (confidences >= lo) & (confidences < hi)
+            m = int(mask.sum())
+            if m == 0:
+                continue
+            ece += (m / n) * abs(confidences[mask].mean() - accuracies[mask].mean())
+        return float(ece)
+
+    @staticmethod
+    def conf_acc_from_logits(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        T: float = 1.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        T = max(float(T), 1e-3)
+        # (B, max_len, vocab_size)
+        probs = torch.softmax(logits / T, dim=-1)
+        # (B, max_len)
+        conf, pred = probs.max(dim=-1)
+
+        # Mask out PAD positions (PAD_IDX=1) so they don't inflate accuracy
+        pad_mask = labels != 1
+        conf = conf[pad_mask].numpy()
+        correct = (pred[pad_mask] == labels[pad_mask]).float().numpy()
+        return conf, correct
+
+    def evaluate_calibration(
+        self,
+        val_loader: DataLoader,
+        temperatures: dict[str, float] | None = None,
+    ) -> dict[str, dict[str, float]]:
+        field_logits, field_labels = self.collect_logits_labels(val_loader)
+
+        results: dict[str, dict[str, float]] = {}
+        for field in FIELDS:
+            conf_raw, acc_raw = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=1.0
+            )
+            ece_raw = self.compute_ece(conf_raw, acc_raw)
+
+            if temperatures and field in temperatures:
+                conf_cal, acc_cal = self.conf_acc_from_logits(
+                    field_logits[field], field_labels[field], T=temperatures[field]
+                )
+                ece_cal = self.compute_ece(conf_cal, acc_cal)
+                mean_conf = float(conf_cal.mean())
+            else:
+                ece_cal = None
+                mean_conf = float(conf_raw.mean())
+
+            results[field] = {
+                "ece_raw": ece_raw,
+                "ece_calibrated": ece_cal,
+                "mean_confidence": mean_conf,
+            }
+        return results
+
+    @staticmethod
+    def plot_reliability_diagram(
+        confidences: np.ndarray,
+        accuracies: np.ndarray,
+        field_name: str,
+        n_bins: int = 10,
+        save_path: str | Path | None = None,
+    ) -> None:
+        confidences = np.asarray(confidences, dtype=np.float64).reshape(-1)
+        accuracies = np.asarray(accuracies, dtype=np.float64).reshape(-1)
+
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2
+
+        bin_acc = np.zeros(n_bins)
+        for i in range(n_bins):
+            lo, hi = edges[i], edges[i + 1]
+            if i == n_bins - 1:
+                mask = (confidences >= lo) & (confidences <= hi)
+            else:
+                mask = (confidences >= lo) & (confidences < hi)
+            if int(mask.sum()) > 0:
+                bin_acc[i] = accuracies[mask].mean()
+
+        width = 1.0 / n_bins
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.bar(
+            centers,
+            bin_acc,
+            width=width * 0.95,
+            edgecolor="black",
+            alpha=0.85,
+            label="Accuracy",
+        )
+        ax.plot([0, 1], [0, 1], "--", linewidth=1, label="Perfect calibration")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("Confidence")
+        ax.set_ylabel("Accuracy")
+        ax.set_title(f"Reliability — {field_name}")
+        ax.legend(loc="upper left", fontsize=8)
+        plt.tight_layout()
+
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, dpi=120)
+        plt.close(fig)
+
+    def save_reliability_diagrams(
+        self,
+        val_loader: DataLoader,
+        temperatures: dict[str, float],
+        save_dir: str | Path = DEFAULT_PLOTS,
+    ) -> None:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        field_logits, field_labels = self.collect_logits_labels(val_loader)
+
+        for field in FIELDS:
+            T = temperatures.get(field, 1.0)
+            conf, correct = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
+            out_path = save_dir / f"reliability_{field}.png"
+            self.plot_reliability_diagram(
+                conf, correct, field_name=field, save_path=out_path
+            )
+            print(f"  saved {out_path}")
+
+    def precision_coverage_curve(
+        self,
+        val_loader: DataLoader,
+        temperatures: dict[str, float] | None = None,
+        thresholds: np.ndarray | None = None,
+    ) -> dict[str, dict[str, list]]:
+        field_logits, field_labels = self.collect_logits_labels(val_loader)
+        if thresholds is None:
+            thresholds = np.linspace(0.0, 1.0, 21)
+
+        results: dict[str, dict[str, list]] = {}
+        for field in FIELDS:
+            T = float((temperatures or {}).get(field, 1.0))
+            conf, correct = self.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
+            n = len(conf)
+
+            precs: list[float] = []
+            covs: list[float] = []
+            for t in thresholds:
+                mask = conf >= t
+                kept = int(mask.sum())
+                if kept == 0:
+                    precs.append(float("nan"))
+                    covs.append(0.0)
+                else:
+                    precs.append(float(correct[mask].mean()))
+                    covs.append(float(kept / n))
+
+            results[field] = {
+                "thresholds": [float(t) for t in thresholds],
+                "precision": precs,
+                "coverage": covs,
+            }
+        return results
+
+
+class ConfidenceDataModule:
+    @staticmethod
+    def build_val_loader(
+        dataset_base: str | Path = DATASET_BASE,
+        image_size: int = 384,
+        batch_size: int = 16,
+        num_workers: int = 0,
+    ) -> DataLoader:
+        val_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        _, df_val, _ = load_sroie_split(str(dataset_base))
+        val_dataset = SROIEDataset(
+            df_val, base_path=str(dataset_base), transform=val_transform
+        )
+        return DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+        )
+
+conf_thresholds_class.py:
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms
+
+from field_vocab import FieldVocab, FIELDS
+from vit_model import ReceiptViT
+from data_loader import SROIEDataset, load_sroie_split, collate_fn
+from experiment_logger import log_experiment
+from conf_scoring_class import (
+    ConfidenceScorer,
+    DATASET_BASE,
+    DEFAULT_CKPT,
+    DEFAULT_VOCAB,
+    DEFAULT_TEMPS,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_THRESH = REPO_ROOT / "Experiments" / "thresholds.json"
+DEFAULT_LOG = REPO_ROOT / "Experiments" / "experiment_log.csv"
+
+
+class ConfidenceThresholdManager:
+    def __init__(self, scorer: ConfidenceScorer):
+        self.scorer = scorer
+
+    @staticmethod
+    def select_threshold(
+        confidences: np.ndarray,
+        correct: np.ndarray,
+        mode: str = "target_precision",
+        target: float = 0.95,
+    ) -> float:
+        conf = np.asarray(confidences, dtype=np.float64).reshape(-1)
+        correct = np.asarray(correct, dtype=np.float64).reshape(-1)
+        n = conf.shape[0]
+        if n == 0:
+            return 0.0
+
+        if mode == "target_precision":
+            candidates = np.unique(np.concatenate([[0.0], conf]))
+            candidates.sort()
+            for t in candidates:
+                mask = conf >= t
+                kept = int(mask.sum())
+                if kept == 0:
+                    continue
+                precision = correct[mask].mean()
+                if precision >= target:
+                    return float(t)
+            return float(conf.max())
+
+        if mode == "target_coverage":
+            candidates = np.unique(np.concatenate([[0.0], conf]))
+            candidates.sort()
+            best_t = 0.0
+            for t in candidates:
+                coverage = float((conf >= t).mean())
+                if coverage >= target:
+                    best_t = float(t)
+                else:
+                    break
+            return best_t
+
+        if mode == "max_f1":
+            sweep = np.linspace(0.0, 1.0, 200)
+            best_f1 = -1.0
+            best_t = 0.0
+            for t in sweep:
+                mask = conf >= t
+                kept = int(mask.sum())
+                if kept == 0:
+                    f1 = 0.0
+                else:
+                    tp = float(correct[mask].sum())
+                    p = tp / kept
+                    r = tp / n
+                    f1 = 0.0 if (p + r) == 0 else (2 * p * r) / (p + r)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_t = float(t)
+            return best_t
+
+        raise ValueError(
+            "mode must be 'target_precision', 'target_coverage', or 'max_f1'"
+        )
+
+    def select_all_thresholds(
+        self,
+        val_loader: DataLoader,
+        temperatures: dict[str, float],
+        mode: str = "target_precision",
+        target: float = 0.95,
+        save_path: str | Path | None = DEFAULT_THRESH,
+    ) -> dict[str, float]:
+        field_logits, field_labels = self.scorer.collect_logits_labels(val_loader)
+
+        thresholds: dict[str, float] = {}
+        for field in FIELDS:
+            T = float(temperatures.get(field, 1.0))
+            conf, correct = self.scorer.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
+            t = self.select_threshold(conf, correct, mode=mode, target=target)
+            thresholds[field] = t
+            print(f"  {field:8s}  t = {t:.4f}")
+
+        if save_path is not None:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "w") as fh:
+                json.dump(thresholds, fh, indent=2)
+            print(f"✓ Thresholds saved to {save_path}")
+
+        return thresholds
+
+    def apply_thresholds(
+        self,
+        images: torch.Tensor,
+        temperatures: dict[str, float],
+        thresholds: dict[str, float],
+        abstain_token: str = "<REVIEW>",
+    ) -> dict[str, dict[str, list]]:
+        raw = self.scorer.predict_with_confidence(images, temperatures=temperatures)
+
+        out: dict[str, dict[str, list]] = {}
+        for field, payload in raw.items():
+            t = float(thresholds.get(field, 0.0))
+            labels = list(payload["label"])
+            confs = [float(c) for c in payload["confidence"]]
+            abstain = [c < t for c in confs]
+            labels = [
+                abstain_token if a else label for label, a in zip(labels, abstain)
+            ]
+            out[field] = {"label": labels, "confidence": confs, "abstained": abstain}
+        return out
+
+    def compute_operating_point(
+        self,
+        loader: DataLoader,
+        temperatures: dict[str, float],
+        thresholds: dict[str, float],
+    ) -> dict[str, Any]:
+        field_logits, field_labels = self.scorer.collect_logits_labels(loader)
+
+        per_field: dict[str, dict[str, float]] = {}
+        abstained_matrix: list[np.ndarray] = []
+
+        for field in FIELDS:
+            T = float(temperatures.get(field, 1.0))
+            conf, correct = self.scorer.conf_acc_from_logits(
+                field_logits[field], field_labels[field], T=T
+            )
+            N = conf.shape[0]
+            t = float(thresholds.get(field, 0.0))
+            retained = conf >= t
+            kept = int(retained.sum())
+
+            coverage = kept / N if N > 0 else 0.0
+            review_rate = 1.0 - coverage
+            precision = float(correct[retained].mean()) if kept > 0 else float("nan")
+
+            per_field[field] = {
+                "precision_retained": precision,
+                "coverage": float(coverage),
+                "review_rate": float(review_rate),
+            }
+            abstained_matrix.append(~retained)
+
+        mean_review_rate = float(np.mean([per_field[f]["review_rate"] for f in FIELDS]))
+        any_abstained = (
+            np.any(np.stack(abstained_matrix, axis=0), axis=0)
+            if abstained_matrix
+            else np.array([])
+        )
+        any_rate = float(any_abstained.mean()) if any_abstained.size > 0 else 0.0
+
+        return {
+            "per_field": per_field,
+            "mean_review_rate": mean_review_rate,
+            "any_abstained_rate": any_rate,
+        }
+
+    @staticmethod
+    def log_operating_point(
+        operating_point_dict: dict[str, Any],
+        experiment_name: str,
+        extra_metrics: dict[str, Any] | None = None,
+        log_path: str | Path = DEFAULT_LOG,
+    ) -> None:
+        results: dict[str, Any] = {
+            "review_rate": operating_point_dict.get("mean_review_rate")
+        }
+        if extra_metrics:
+            results.update(extra_metrics)
+        log_experiment(experiment_name, results, path=log_path)
+
+    @staticmethod
+    def print_operating_point(op: dict[str, Any]) -> None:
+        print(
+            f"\n{'Field':10s}  {'precision':>10s}  {'coverage':>10s}  {'review':>10s}"
+        )
+        print("-" * 46)
+        for field, metrics in op["per_field"].items():
+            prec = metrics["precision_retained"]
+            prec_str = f"{prec:10.4f}" if not np.isnan(prec) else f"{'n/a':>10s}"
+            print(
+                f"{field:10s}  {prec_str}  {metrics['coverage']:10.4f}  {metrics['review_rate']:10.4f}"
+            )
+        print(f"\n  mean_review_rate   = {op['mean_review_rate']:.4f}")
+        print(f"  any_abstained_rate = {op['any_abstained_rate']:.4f}")
+
+
+class ThresholdDataModule:
+    @staticmethod
+    def build_test_loader(
+        dataset_base: str | Path = DATASET_BASE,
+        image_size: int = 384,
+        batch_size: int = 16,
+        num_workers: int = 0,
+    ) -> DataLoader:
+        test_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        _, _, df_test = load_sroie_split(str(dataset_base))
+        test_dataset = SROIEDataset(
+            df_test, base_path=str(dataset_base), transform=test_transform
+        )
+        return DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+        )
+
+data_loader.py:
+
+
+import os
+import json
+from pathlib import Path
+
+import pandas as pd
+import torch
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torchvision import transforms
+
+BASE = "../sroie-receipt-dataset/SROIE2019"
+CACHE_DIR = Path("../Experiments/img_cache")
+SPLITS = ["train", "test"]
+SEED = 42
+RESOLUTION = 224
+
+
+# SROIE
+
+
+def build_dataframe(base_path=BASE):
+    records = []
+    for split in SPLITS:
+        img_dir = os.path.join(base_path, split, "img")
+        ent_dir = os.path.join(base_path, split, "entities")
+
+        for img_file in sorted(f for f in os.listdir(img_dir) if f.endswith(".jpg")):
+            stem = os.path.splitext(img_file)[0]
+            ent_path = os.path.join(ent_dir, stem + ".txt")
+            img = Image.open(os.path.join(img_dir, img_file))
+            w, h = img.size
+
+            fields = {"company": None, "date": None, "address": None, "total": None}
+            if os.path.exists(ent_path):
+                with open(ent_path, "r", encoding="utf-8", errors="ignore") as f:
+                    try:
+                        data = json.load(f)
+                        for key in fields:
+                            fields[key] = data.get(key) or None
+                    except json.JSONDecodeError:
+                        pass
+
+            records.append(
+                {"split": split, "file": img_file, "width": w, "height": h, **fields}
+            )
+
+    return pd.DataFrame(records)
+
+
+def load_sroie_split(base_path=BASE):
+    df = build_dataframe(base_path)
+    df_train_full = df[df["split"] == "train"].reset_index(drop=True)
+    df_test = df[df["split"] == "test"].reset_index(drop=True)
+    df_train, df_val = train_test_split(df_train_full, test_size=0.1, random_state=SEED)
+    return df_train, df_val, df_test
+
+
+# CORD
+
+CORD_CACHE_DIR = Path("../Experiments/cord_img_cache")
+
+
+def load_cord_split(cord_cache_dir=CORD_CACHE_DIR):
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError("Run: pip install datasets")
+
+    cord_cache_dir = Path(cord_cache_dir)
+    index_path = cord_cache_dir / "index.json"
+
+    # If already cached to disk, just load the index
+    if index_path.exists():
+        print("  CORD: loading from disk cache")
+        with open(index_path) as f:
+            index = json.load(f)
+        return (
+            pd.DataFrame(index["train"]),
+            pd.DataFrame(index["val"]),
+            pd.DataFrame(index["test"]),
+        )
+
+    print("  CORD: first run — saving images to disk (runs once)...")
+    cord_cache_dir.mkdir(parents=True, exist_ok=True)
+    ds = load_dataset("naver-clova-ix/cord-v2")
+
+    def parse_and_save(examples, split_name):
+        records = []
+        for i, example in enumerate(examples):
+            gt = json.loads(example["ground_truth"])
+            gt_parse = gt.get("gt_parse", {})
+
+            company = gt_parse.get("store_name", "") or ""
+            address = gt_parse.get("store_addr", "") or ""
+            total_block = gt_parse.get("total", {})
+            total = ""
+            if isinstance(total_block, dict):
+                total = str(total_block.get("total_price", "") or "")
+            elif isinstance(total_block, str):
+                total = total_block
+
+            # Save image to disk
+            img_path = cord_cache_dir / f"{split_name}_{i:04d}.jpg"
+            if not img_path.exists():
+                example["image"].convert("RGB").save(img_path, "JPEG")
+
+            records.append(
+                {
+                    "img_path": str(img_path),
+                    "company": company.strip(),
+                    "date": "",
+                    "address": address.strip(),
+                    "total": total.strip(),
+                }
+            )
+        return records
+
+    train_records = parse_and_save(ds["train"], "train")
+    val_records = parse_and_save(ds["validation"], "val")
+    test_records = parse_and_save(ds["test"], "test")
+
+    # Save index so we never need to reload from HuggingFace again
+    with open(index_path, "w") as f:
+        json.dump({"train": train_records, "val": val_records, "test": test_records}, f)
+    print(
+        f"  CORD: saved {len(train_records)} train / {len(val_records)} val / {len(test_records)} test images"
+    )
+
+    # Free HuggingFace dataset from memory immediately
+    del ds
+
+    return (
+        pd.DataFrame(train_records),
+        pd.DataFrame(val_records),
+        pd.DataFrame(test_records),
+    )
+
+
+class CORDDataset(Dataset):
+    def __init__(self, dataframe, is_train=False):
+        self.df = dataframe.reset_index(drop=True)
+        self.transform = TRAIN_TRANSFORM if is_train else VAL_TRANSFORM
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+
+        image = self.transform(Image.open(row["img_path"]).convert("RGB"))
+
+        annotation = {
+            "company": row["company"] or "",
+            "date": row["date"] or "",
+            "address": row["address"] or "",
+            "total": row["total"] or "",
+        }
+
+        return image, annotation
+
+
+# WildReceipt
+
+_WILDRECEIPT_FIELD_IDS = {
+    "company": {1},
+    "date": {3},
+    "total": {25},
+    "address": {5},
+}
+
+
+def load_wildreceipt_split(base_path="../wildreceipt"):
+    base_path = Path(base_path)
+    train_txt = base_path / "train.txt"
+    test_txt = base_path / "test.txt"
+
+    if not train_txt.exists():
+        raise FileNotFoundError(
+            f"WildReceipt not found at {base_path}.\n"
+            "Download: https://download.openmmlab.com/mmocr/data/wildreceipt.tar\n"
+            "Extract to ../wildreceipt/"
+        )
+
+    def parse_file(txt_path):
+        records = []
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                img_path = base_path / data["file_name"]
+                fields = {"company": [], "date": [], "total": [], "address": []}
+
+                for ann in data.get("annotations", []):
+                    cat_id = ann.get("category_id", -1)
+                    text = ann.get("text", "").strip()
+                    for field, ids in _WILDRECEIPT_FIELD_IDS.items():
+                        if cat_id in ids and text:
+                            fields[field].append(text)
+
+                records.append(
+                    {
+                        "img_path": str(img_path),
+                        "company": " ".join(fields["company"]),
+                        "date": " ".join(fields["date"]),
+                        "address": " ".join(fields["address"]),
+                        "total": " ".join(fields["total"]),
+                    }
+                )
+        return pd.DataFrame(records)
+
+    df_all = parse_file(train_txt)
+    df_test = parse_file(test_txt)
+    df_train, df_val = train_test_split(df_all, test_size=0.1, random_state=SEED)
+    return (
+        df_train.reset_index(drop=True),
+        df_val.reset_index(drop=True),
+        df_test.reset_index(drop=True),
+    )
+
+
+# Shared transforms
+
+TRAIN_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((RESOLUTION, RESOLUTION)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.RandomRotation(degrees=3),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+VAL_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((RESOLUTION, RESOLUTION)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
+
+# Datasets
+class SROIEDataset(Dataset):
+    def __init__(
+        self,
+        dataframe,
+        base_path=BASE,
+        transform=None,
+        is_train=False,
+        cache_dir=CACHE_DIR,
+    ):
+        self.df = dataframe.reset_index(drop=True)
+        self.base_path = base_path
+        self.is_train = is_train
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.transform = transform or (TRAIN_TRANSFORM if is_train else VAL_TRANSFORM)
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+
+        cache_path = None
+        if self.cache_dir and not self.is_train:
+            cache_path = self.cache_dir / row["file"].replace(".jpg", ".pt")
+
+        if cache_path and cache_path.exists():
+            image = torch.load(cache_path, weights_only=True)
+        else:
+            img_path = os.path.join(self.base_path, row["split"], "img", row["file"])
+            image = self.transform(Image.open(img_path).convert("RGB"))
+            if cache_path and self.cache_dir:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(image, cache_path)
+
+        annotation = {
+            "company": row["company"] or "",
+            "date": row["date"] or "",
+            "address": row["address"] or "",
+            "total": row["total"] or "",
+        }
+        return image, annotation
+
+
+class WildReceiptDataset(Dataset):
+    def __init__(self, dataframe, is_train=False):
+        self.df = dataframe.reset_index(drop=True)
+        self.transform = TRAIN_TRANSFORM if is_train else VAL_TRANSFORM
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        image = self.transform(Image.open(row["img_path"]).convert("RGB"))
+        annotation = {
+            "company": row["company"] or "",
+            "date": row["date"] or "",
+            "address": row["address"] or "",
+            "total": row["total"] or "",
+        }
+        return image, annotation
+
+
+# Collate
+
+
+def collate_fn(batch):
+    images = torch.stack([item[0] for item in batch])
+    annotations = [item[1] for item in batch]
+    return images, annotations
+
+
+# Main entry point
+
+
+def get_dataloaders(
+    base_path=BASE,
+    batch_size=32,
+    num_workers=None,
+    cache_dir=CACHE_DIR,
+    use_cord=False,
+    use_wildreceipt=False,
+    wildreceipt_path="../wildreceipt",
+):
+    is_mps = torch.backends.mps.is_available()
+    if num_workers is None:
+        num_workers = 0 if is_mps else 4
+    pin_memory = not is_mps
+
+    # Always load SROIE
+    df_train, df_val, df_test = load_sroie_split(base_path)
+    train_datasets = [
+        SROIEDataset(df_train, base_path, is_train=True, cache_dir=cache_dir)
+    ]
+    val_datasets = [
+        SROIEDataset(df_val, base_path, is_train=False, cache_dir=cache_dir)
+    ]
+    test_datasets = [
+        SROIEDataset(df_test, base_path, is_train=False, cache_dir=cache_dir)
+    ]
+
+    # Optionally add CORD
+    if use_cord:
+        print("Loading CORD dataset...")
+        cord_train, cord_val, cord_test = load_cord_split()
+        train_datasets.append(CORDDataset(cord_train, is_train=True))
+        val_datasets.append(CORDDataset(cord_val, is_train=False))
+        test_datasets.append(CORDDataset(cord_test, is_train=False))
+        print(
+            f"  CORD: {len(cord_train)} train / {len(cord_val)} val / {len(cord_test)} test"
+        )
+
+    # Optionally add WildReceipt
+    if use_wildreceipt:
+        print("Loading WildReceipt dataset...")
+        wr_train, wr_val, wr_test = load_wildreceipt_split(wildreceipt_path)
+        train_datasets.append(WildReceiptDataset(wr_train, is_train=True))
+        val_datasets.append(WildReceiptDataset(wr_val, is_train=False))
+        test_datasets.append(WildReceiptDataset(wr_test, is_train=False))
+        print(
+            f"  WildReceipt: {len(wr_train)} train / {len(wr_val)} val / {len(wr_test)} test"
+        )
+
+    # Combine
+    train_set = (
+        ConcatDataset(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
+    )
+    val_set = ConcatDataset(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+    test_set = (
+        ConcatDataset(test_datasets) if len(test_datasets) > 1 else test_datasets[0]
+    )
+
+    print(f"Total: {len(train_set)} train / {len(val_set)} val / {len(test_set)} test")
+
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),
+    )
+    test_loader = DataLoader(
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=(num_workers > 0),
+    )
+    return train_loader, val_loader, test_loader
+
+data_setup.py:
+
+"""
+Dataset setup helper for the receipt understanding project.
+
+Put this file at:
+
+    CS_4375_Project/src/data_setup.py
+
+Recommended:
+    Upload one public zip containing:
+        sroie-receipt-dataset/
+        CORD/
+        wildreceipt/
+
+    Then paste the direct public URL below.
+"""
+
+from __future__ import annotations
+
+import os
+import tarfile
+import zipfile
+from pathlib import Path
+
+import requests
+from tqdm import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Best option for TA reproducibility:
+# Upload one public zip to Google Drive, GitHub Release, or AWS S3.
+# The zip should extract directly into the project root and contain:
+#   sroie-receipt-dataset/
+#   CORD/
+#   wildreceipt/
+PUBLIC_DATA_BUNDLE_URL = "PASTE_YOUR_PUBLIC_DATA_BUNDLE_ZIP_URL_HERE"
+
+WILDRECEIPT_URL = "https://download.openmmlab.com/mmocr/data/wildreceipt.tar"
+
+
+def _download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"Already downloaded: {dest}")
+        return
+
+    print(f"Downloading:\n  {url}\n→ {dest}")
+
+    with requests.get(url, stream=True, timeout=60) as response:
+        response.raise_for_status()
+
+        total = int(response.headers.get("content-length", 0))
+        with open(dest, "wb") as f, tqdm(
+            total=total,
+            unit="B",
+            unit_scale=True,
+            desc=dest.name,
+        ) as pbar:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+
+def _extract_zip(zip_path: Path, extract_to: Path) -> None:
+    print(f"Extracting zip: {zip_path}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_to)
+
+
+def _extract_tar(tar_path: Path, extract_to: Path) -> None:
+    print(f"Extracting tar: {tar_path}")
+    with tarfile.open(tar_path, "r:*") as tf:
+        tf.extractall(extract_to)
+
+
+def _exists_sroie() -> bool:
+    return (REPO_ROOT / "sroie-receipt-dataset" / "SROIE2019").exists()
+
+
+def _exists_wildreceipt() -> bool:
+    root = REPO_ROOT / "wildreceipt"
+    return (root / "train.txt").exists() and (root / "test.txt").exists()
+
+
+def setup_public_bundle() -> bool:
+    """
+    Downloads a public project data bundle if PUBLIC_DATA_BUNDLE_URL is set.
+
+    Returns True if a bundle was downloaded/extracted or already appears present.
+    """
+    url = PUBLIC_DATA_BUNDLE_URL.strip()
+
+    if not url or "PASTE_YOUR_PUBLIC_DATA_BUNDLE_ZIP_URL_HERE" in url:
+        return False
+
+    if _exists_sroie() and _exists_wildreceipt():
+        print("Dataset folders already exist. Skipping public bundle download.")
+        return True
+
+    bundle_path = REPO_ROOT / "project_data_bundle.zip"
+    _download(url, bundle_path)
+    _extract_zip(bundle_path, REPO_ROOT)
+
+    print("Public data bundle extracted.")
+    return True
+
+
+def setup_wildreceipt() -> None:
+    """
+    Downloads WildReceipt from the public OpenMMLab tar if it is missing.
+    """
+    if _exists_wildreceipt():
+        print("WildReceipt already exists.")
+        return
+
+    tar_path = REPO_ROOT / "wildreceipt.tar"
+    _download(WILDRECEIPT_URL, tar_path)
+    _extract_tar(tar_path, REPO_ROOT)
+
+    if not _exists_wildreceipt():
+        print(
+            "WildReceipt extracted, but the expected train.txt/test.txt files "
+            "were not found directly under CS_4375_Project/wildreceipt/. "
+            "Check the extracted folder and rename/move it to wildreceipt/ if needed."
+        )
+    else:
+        print("WildReceipt ready.")
+
+
+def check_sroie() -> None:
+    """
+    SROIE is usually hosted behind official challenge/download pages.
+    For the cleanest TA setup, include it in the public project data bundle.
+    """
+    if _exists_sroie():
+        print("SROIE found.")
+        return
+
+    print(
+        "\nSROIE was not found at:\n"
+        f"  {REPO_ROOT / 'sroie-receipt-dataset' / 'SROIE2019'}\n\n"
+        "To make this fully automatic for the TA, upload a public zip bundle "
+        "containing sroie-receipt-dataset/, CORD/, and wildreceipt/, then paste "
+        "that URL into PUBLIC_DATA_BUNDLE_URL in src/data_setup.py.\n"
+    )
+
+
+def setup_all() -> None:
+    """
+    Main setup entrypoint.
+    """
+    used_bundle = setup_public_bundle()
+
+    if not used_bundle:
+        setup_wildreceipt()
+        check_sroie()
+
+    print("\nDataset setup check complete.")
+    print("Expected project-root folders:")
+    print("  sroie-receipt-dataset/SROIE2019/")
+    print("  CORD/ or Hugging Face CORD cache")
+    print("  wildreceipt/")
+
+
+if __name__ == "__main__":
+    setup_all()
+
+
+experiment_logger.py:
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+# Schema
+
+COLUMNS: list[str] = [
+    "experiment_id",
+    "description",
+    "model_type",
+    "patch_size",
+    "num_layers",
+    "num_heads",
+    "learning_rate",
+    "train_test_split",
+    "exact_match_vendor",
+    "exact_match_date",
+    "exact_match_address",
+    "exact_match_total",
+    "f1_vendor",
+    "f1_date",
+    "f1_address",
+    "f1_total",
+    "overall_f1",
+    "review_rate",
+    "notes",
+]
+
+# Fields produced by baseline.py that need renaming before writing to the CSV.
+# key = name in results dict / JSON, value = CSV column name.
+_FIELD_ALIASES: dict[str, str] = {
+    "company": "vendor",
+}
+
+# Metric columns — values here should be rounded floats or blank.
+_METRIC_COLS: set[str] = {
+    "exact_match_vendor",
+    "exact_match_date",
+    "exact_match_address",
+    "exact_match_total",
+    "f1_vendor",
+    "f1_date",
+    "f1_address",
+    "f1_total",
+    "overall_f1",
+    "review_rate",
+}
+
+# Initialize_log
+
+
+def initialize_log(path: str | Path = "experiment_log.csv") -> None:
+    csv_path = Path(path)
+    if csv_path.exists():
+        return
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=COLUMNS).to_csv(csv_path, index=False)
+    print(f"✓ Initialized {csv_path}")
+
+
+# log_experiment
+
+
+def log_experiment(
+    experiment_id: str | int,
+    results_dict: dict[str, Any],
+    path: str | Path = "experiment_log.csv",
+) -> None:
+    csv_path = Path(path)
+    initialize_log(csv_path)
+
+    try:
+        df = pd.read_csv(csv_path, dtype=str)
+    except Exception as exc:
+        raise RuntimeError(f"Could not read {csv_path}: {exc}") from exc
+
+    # Ensure all expected columns exist, preserve any extras already in the file.
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    row: dict[str, Any] = {"experiment_id": str(experiment_id)}
+    for col in df.columns:
+        if col == "experiment_id":
+            continue
+        val = results_dict.get(col)
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            row[col] = ""
+        elif col in _METRIC_COLS and val != "":
+            try:
+                row[col] = str(round(float(val), 4))
+            except (ValueError, TypeError):
+                row[col] = str(val)
+        else:
+            row[col] = "" if val == "" else str(val)
+
+    new_row_df = pd.DataFrame([row], columns=df.columns)
+
+    mask = df["experiment_id"].astype(str) == str(experiment_id)
+    try:
+        if mask.any():
+            df.loc[mask, :] = new_row_df.values
+        else:
+            df = pd.concat([df, new_row_df], ignore_index=True)
+
+        df.to_csv(csv_path, index=False)
+    except PermissionError:
+        raise PermissionError(
+            f"Cannot write to {csv_path}. "
+            "Close experiment_log.csv in Excel/Sheets and retry."
+        )
+
+    print(f"✓ {experiment_id} logged to {csv_path}")
+
+
+# log_from_json
+
+
+def log_from_json(
+    experiment_id: str | int,
+    json_path: str | Path,
+    description: str,
+    model_type: str,
+    extra_params: dict[str, Any] | None = None,
+    path: str | Path = "experiment_log.csv",
+) -> None:
+    json_path = Path(json_path)
+    if not json_path.exists():
+        raise FileNotFoundError(f"Results file not found: {json_path}")
+
+    try:
+        with json_path.open() as fh:
+            raw: dict = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed JSON in {json_path}: {exc}") from exc
+
+    results: dict[str, Any] = {
+        "description": description,
+        "model_type": model_type,
+    }
+
+    # Detect and flatten nested format produced by evaluate()
+    # Keys are field names; values are dicts with "exact_match" and "f1".
+    field_names = {"company", "vendor", "date", "address", "total"}
+    is_nested = any(isinstance(raw.get(k), dict) for k in field_names | {"overall"})
+
+    if is_nested:
+        for src_field, csv_suffix in [
+            ("company", "vendor"),
+            ("vendor", "vendor"),
+            ("date", "date"),
+            ("address", "address"),
+            ("total", "total"),
+        ]:
+            sub = raw.get(src_field)
+            if isinstance(sub, dict):
+                if "exact_match" in sub:
+                    results[f"exact_match_{csv_suffix}"] = sub["exact_match"]
+                if "f1" in sub:
+                    results[f"f1_{csv_suffix}"] = sub["f1"]
+
+        overall = raw.get("overall", {})
+        if isinstance(overall, dict) and "f1" in overall:
+            results["overall_f1"] = overall["f1"]
+    else:
+        # Flat format, copy recognised columns directly, apply alias mapping.
+        for key, val in raw.items():
+            # Apply alias: "company" → "vendor"
+            for src, dst in _FIELD_ALIASES.items():
+                key = key.replace(src, dst)
+            results[key] = val
+
+    if extra_params:
+        results.update(extra_params)
+
+    log_experiment(experiment_id, results, path=path)
+
+
+# prepare_vit_rows
+
+
+def prepare_vit_rows(path: str | Path = "experiment_log.csv") -> None:
+    vit_configs = [
+        {
+            "experiment_id": "Exp2",
+            "description": "ViT — patch=16, layers=4, heads=4",
+            "model_type": "ViT",
+            "patch_size": 16,
+            "num_layers": 4,
+            "num_heads": 4,
+            "learning_rate": 1e-4,
+            "train_test_split": "80/10/10",
+        },
+        {
+            "experiment_id": "Exp3",
+            "description": "ViT — patch=16, layers=6, heads=8",
+            "model_type": "ViT",
+            "patch_size": 16,
+            "num_layers": 6,
+            "num_heads": 8,
+            "learning_rate": 1e-4,
+            "train_test_split": "80/10/10",
+        },
+    ]
+
+    csv_path = Path(path)
+    initialize_log(csv_path)
+
+    try:
+        df = pd.read_csv(csv_path, dtype=str)
+    except Exception as exc:
+        raise RuntimeError(f"Could not read {csv_path}: {exc}") from exc
+
+    existing_ids = (
+        set(df["experiment_id"].astype(str).tolist())
+        if "experiment_id" in df.columns
+        else set()
+    )
+
+    for cfg in vit_configs:
+        exp_id = cfg["experiment_id"]
+        if exp_id in existing_ids:
+            print(f"  {exp_id} already exists — skipping")
+            continue
+        params = {k: v for k, v in cfg.items() if k != "experiment_id"}
+        log_experiment(exp_id, params, path=csv_path)
+
+
+# CLI / demo
+
+if __name__ == "__main__":
+    LOG = Path(__file__).parent.parent / "experiment_log.csv"
+
+    print("── Initializing log ──")
+    initialize_log(LOG)
+
+    print("\n── Pre-populating ViT rows ──")
+    prepare_vit_rows(LOG)
+
+    print("\n── Current log ──")
+    df = pd.read_csv(LOG)
+    print(df.to_string(index=False))
+
+
+field_vocab.py:
+
+from __future__ import annotations
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+import pandas as pd
+
+UNK = "<UNK>"
+PAD = "<PAD>"
+UNK_IDX = 0
+PAD_IDX = 1
+
+FIELDS = ["vendor", "date", "total", "address"]
+_DF_COL = {"vendor": "company", "date": "date", "total": "total", "address": "address"}
+
+# Maximum output length per field (in characters)
+MAX_LEN = {"vendor": 48, "date": 10, "total": 8, "address": 64}
+MAX_LEN_INT = max(MAX_LEN.values())  # ← ADD THIS (= 64)
+
+CHAR_VOCAB = (
+    [UNK, PAD]
+    + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    + list("abcdefghijklmnopqrstuvwxyz")  # ← ADD lowercase
+    + list("0123456789")
+    + list(" .,/-:()&'@#%+*=_\"!?;")  # ← ADD more punctuation
+)
+CHAR2IDX = {c: i for i, c in enumerate(CHAR_VOCAB)}
+IDX2CHAR = {i: c for i, c in enumerate(CHAR_VOCAB)}
+CHAR_VOCAB_SIZE = len(CHAR_VOCAB)  # ~44 chars
+
+
+def normalize_label(field: str, value: str) -> str:
+    if not value:
+        return ""
+    value = value.strip()
+    if field == "date":
+        for fmt in (
+            "%d/%m/%Y",
+            "%d/%m/%y",
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d-%m-%y",
+            "%d %b %Y",
+            "%d %B %Y",
+            "%d.%m.%Y",
+            "%d.%m.%y",
+            "%m/%d/%Y",
+            "%m/%d/%y",
+        ):
+            try:
+                return datetime.strptime(value, fmt).strftime("%d/%m/%Y")
+            except ValueError:
+                pass
+        return value.upper()
+    if field == "total":
+        num = re.sub(r"[^\d.]", "", value)
+        try:
+            return f"{float(num):.2f}"
+        except ValueError:
+            return value.upper()
+    return re.sub(r"\s+", " ", value.upper())
+
+
+def encode_chars(field: str, text: str) -> list[int]:
+    maxlen = MAX_LEN[field]
+    text = normalize_label(field, text)[:maxlen]
+    idxs = [CHAR2IDX.get(c, UNK_IDX) for c in text]
+    # Pad to maxlen
+    idxs += [PAD_IDX] * (maxlen - len(idxs))
+    return idxs
+
+
+def decode_chars(field: str, indices: list[int]) -> str:
+    chars = [IDX2CHAR.get(i, "") for i in indices if i not in (PAD_IDX, UNK_IDX)]
+    return "".join(chars).strip()
+
+
+class FieldVocab:
+    def __init__(self, vocabs: dict = None):
+        # vocabs param kept for load() compatibility but not used
+        pass
+
+    @classmethod
+    def build(cls, df_train: pd.DataFrame) -> "FieldVocab":
+        return cls()
+
+    def encode(self, field: str, label: str) -> list[int]:
+        return encode_chars(field, label)
+
+    def decode(self, field: str, indices: list[int] | int) -> str:
+        if isinstance(indices, int):
+            return IDX2CHAR.get(indices, "")
+        return decode_chars(field, indices)
+
+    def size(self, field: str) -> int:
+        return CHAR_VOCAB_SIZE
+
+    def vocab_sizes(self) -> dict[str, int]:
+        return {f: CHAR_VOCAB_SIZE for f in FIELDS}
+
+    def save(self, path: str | Path) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(
+                {"type": "char_level", "vocab": CHAR_VOCAB, "max_len": MAX_LEN},
+                f,
+                indent=2,
+            )
+        print(f"✓ Char vocab saved to {path}")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "FieldVocab":
+        return cls()
+
+review_queue.py:
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+from field_vocab import FIELDS, _DF_COL
+
+
+# Data classes
+@dataclass
+class FieldResult:
+    field_name: str
+    predicted_text: str
+    # calibrated probability in [0, 1]
+    confidence: float
+    needs_review: bool = False
+    # filled in after human review
+    corrected_text: Optional[str] = None
+
+
+@dataclass
+class ReceiptResult:
+    # filename or unique ID
+    receipt_id: str
+    fields: Dict[str, FieldResult] = field(default_factory=dict)
+    # True iff ALL fields above threshold
+    auto_accepted: bool = False
+    # True after a human has confirmed it
+    reviewed: bool = False
+
+    def flag_fields(self, thresholds: Dict[str, float]) -> None:
+        any_flagged = False
+        for fname, result in self.fields.items():
+            # fallback to 0.80 if missing
+            t = thresholds.get(fname, 0.80)
+            result.needs_review = result.confidence < t
+            if result.needs_review:
+                any_flagged = True
+        self.auto_accepted = not any_flagged
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        return d
+
+
+# ReviewQueue
+
+
+class ReviewQueue:
+    def __init__(self, thresholds: Dict[str, float]):
+
+        self.thresholds: Dict[str, float] = thresholds
+        self.auto_accepted: List[ReceiptResult] = []
+        self.pending_review: List[ReceiptResult] = []
+
+    # Core ingestion
+
+    def ingest(
+        self,
+        receipt_id: str,
+        field_predictions: Dict[str, str],
+        field_confidences: Dict[str, float],
+    ) -> ReceiptResult:
+        result = ReceiptResult(receipt_id=receipt_id)
+
+        for fname in FIELDS:
+            pred = field_predictions.get(fname, "")
+            conf = field_confidences.get(fname, 0.0)
+            result.fields[fname] = FieldResult(
+                field_name=fname,
+                predicted_text=pred,
+                confidence=conf,
+            )
+
+        result.flag_fields(self.thresholds)
+
+        if result.auto_accepted:
+            self.auto_accepted.append(result)
+        else:
+            self.pending_review.append(result)
+
+        return result
+
+    # Human correction
+
+    def apply_correction(
+        self,
+        receipt_id: str,
+        corrections: Dict[str, str],
+    ) -> Optional[ReceiptResult]:
+        for result in self.pending_review:
+            if result.receipt_id == receipt_id:
+                for fname, text in corrections.items():
+                    if fname in result.fields:
+                        result.fields[fname].corrected_text = text
+                result.reviewed = True
+                return result
+        return None
+
+    # Statistics
+
+    def review_rate(self) -> float:
+        total = len(self.auto_accepted) + len(self.pending_review)
+        if total == 0:
+            return 0.0
+        return len(self.pending_review) / total
+
+    def summary(self) -> Dict:
+        total = len(self.auto_accepted) + len(self.pending_review)
+        reviewed = sum(1 for r in self.pending_review if r.reviewed)
+        return {
+            "total_processed": total,
+            "auto_accepted": len(self.auto_accepted),
+            "pending_review": len(self.pending_review),
+            "human_reviewed": reviewed,
+            "review_rate": round(self.review_rate(), 4),
+            "thresholds_used": self.thresholds,
+        }
+
+    # Persistence
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "summary": self.summary(),
+            "auto_accepted": [r.to_dict() for r in self.auto_accepted],
+            "pending_review": [r.to_dict() for r in self.pending_review],
+        }
+        with open(path, "w") as f:
+            json.dump(state, f, indent=2)
+        print(f"ReviewQueue saved → {path}")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ReviewQueue":
+        path = Path(path)
+        with open(path) as f:
+            state = json.load(f)
+
+        thresholds = state["summary"]["thresholds_used"]
+        queue = cls(thresholds)
+
+        for d in state["auto_accepted"]:
+            r = ReceiptResult(
+                receipt_id=d["receipt_id"], auto_accepted=True, reviewed=d["reviewed"]
+            )
+            for fname, fd in d["fields"].items():
+                r.fields[fname] = FieldResult(**fd)
+            queue.auto_accepted.append(r)
+
+        for d in state["pending_review"]:
+            r = ReceiptResult(
+                receipt_id=d["receipt_id"], auto_accepted=False, reviewed=d["reviewed"]
+            )
+            for fname, fd in d["fields"].items():
+                r.fields[fname] = FieldResult(**fd)
+            queue.pending_review.append(r)
+
+        return queue
+
+
+# Convenience: run the full test set through the queue
+
+
+def build_review_queue_from_loader(
+    model,
+    loader,
+    vocab,
+    scorer,
+    thresholds: Dict[str, float],
+    device,
+    temperatures: Optional[Dict[str, float]] = None,
+) -> Tuple[ReviewQueue, List[dict]]:
+    from field_vocab import FIELDS, _DF_COL
+
+    queue = ReviewQueue(thresholds)
+    row_records = []
+
+    for images, annotations in loader:
+        # predict_with_confidence handles .to(device) and no_grad internally
+        results_batch = scorer.predict_with_confidence(
+            images, temperatures=temperatures
+        )
+        # results_batch keys may be FIELDS values ('vendor') OR _DF_COL values ('company')
+        # detect once per batch and map accordingly
+        sample_keys = set(results_batch.keys())
+        use_col_key = sample_keys == set(_DF_COL.values())
+
+        batch_size = images.size(0)
+        for i in range(batch_size):
+            ann = annotations[i]
+            receipt_id = ann.get("file", f"receipt_{i}")
+
+            field_preds = {}
+            field_confs = {}
+            for fname in FIELDS:
+                rb_key = _DF_COL[fname] if use_col_key else fname
+                field_preds[fname] = results_batch[rb_key]["label"][i]
+                field_confs[fname] = results_batch[rb_key]["confidence"][i]
+
+            result = queue.ingest(receipt_id, field_preds, field_confs)
+
+            row_records.append(
+                {
+                    "receipt_id": receipt_id,
+                    "auto_accepted": result.auto_accepted,
+                    **{f"conf_{f}": result.fields[f].confidence for f in FIELDS},
+                    **{f"pred_{f}": result.fields[f].predicted_text for f in FIELDS},
+                    **{f"gt_{f}": ann.get(_DF_COL[f], "") for f in FIELDS},
+                }
+            )
+
+    return queue, row_records
+
+
+test_vit.py:
+
+import sys
+import torch
+from vit_model import (
+    MultiHeadSelfAttention,
+    FeedForwardBlock,
+    TransformerEncoderLayer,
+    ViTEncoder,
+)
+
+
+def run_tests() -> None:
+    passed = 0
+    total = 0
+
+    def check(label: str, condition: bool) -> None:
+        nonlocal passed, total
+        total += 1
+        status = "PASS" if condition else "FAIL"
+        if condition:
+            passed += 1
+        print(f"  [{status}] {label}")
+
+    # MHSA shape tests
+    print("\n--- MHSA shape tests ---")
+    x_196 = torch.randn(2, 196, 256)
+
+    mhsa4 = MultiHeadSelfAttention(embed_dim=256, num_heads=4)
+    out4 = mhsa4(x_196)
+    check("MHSA output shape", out4.shape == (2, 196, 256))
+
+    mhsa8 = MultiHeadSelfAttention(embed_dim=256, num_heads=8)
+    out8 = mhsa8(x_196)
+    check("MHSA 8-head shape", out8.shape == (2, 196, 256))
+
+    raised = False
+    try:
+        MultiHeadSelfAttention(256, 7)
+    except AssertionError:
+        raised = True
+    check("MHSA invalid heads raises", raised)
+
+    # FFN shape tests
+    print("\n--- FFN shape tests ---")
+    ffn = FeedForwardBlock(embed_dim=256, mlp_ratio=4)
+    out = ffn(x_196)
+    check("FFN output shape", out.shape == (2, 196, 256))
+
+    # TransformerEncoderLayer shape tests
+    print("\n--- TransformerEncoderLayer shape tests ---")
+    layer = TransformerEncoderLayer(embed_dim=256, num_heads=4)
+    out = layer(x_196)
+    check("EncoderLayer output shape", out.shape == (2, 196, 256))
+
+    # ViTEncoder end-to-end tests
+    print("\n--- ViTEncoder end-to-end tests ---")
+    img = torch.randn(2, 3, 224, 224)
+
+    # Exp2
+    enc2 = ViTEncoder(
+        image_size=224,
+        patch_size=16,
+        in_channels=3,
+        embed_dim=256,
+        num_layers=4,
+        num_heads=4,
+    )
+    out2 = enc2(img)
+    check("ViTEncoder Exp2 shape", out2.shape == (2, 196, 256))
+
+    # Exp3
+    enc3 = ViTEncoder(
+        image_size=224,
+        patch_size=16,
+        in_channels=3,
+        embed_dim=256,
+        num_layers=6,
+        num_heads=8,
+    )
+    out3 = enc3(img)
+    check("ViTEncoder Exp3 shape", out3.shape == (2, 196, 256))
+
+    # Deterministic in eval mode
+    enc2.eval()
+    with torch.no_grad():
+        a = enc2(img)
+        b = enc2(img)
+    check("ViTEncoder deterministic eval", torch.equal(a, b))
+
+    # Dropout active in train mode
+    enc_drop = ViTEncoder(
+        image_size=224,
+        patch_size=16,
+        in_channels=3,
+        embed_dim=256,
+        num_layers=4,
+        num_heads=4,
+        dropout=0.5,
+    )
+    enc_drop.train()
+    with torch.no_grad():
+        c = enc_drop(img)
+        d = enc_drop(img)
+    check("ViTEncoder dropout active in train", not torch.equal(c, d))
+
+    # Parameter count sanity
+    print("\n--- Parameter count sanity ---")
+    enc2_fresh = ViTEncoder(
+        image_size=224,
+        patch_size=16,
+        in_channels=3,
+        embed_dim=256,
+        num_layers=4,
+        num_heads=4,
+    )
+    param_count = sum(p.numel() for p in enc2_fresh.parameters() if p.requires_grad)
+    print(f"  Exp2 trainable parameters: {param_count:,}")
+    check("ViTEncoder param count in range", 1_000_000 <= param_count <= 20_000_000)
+
+    # Summary
+    print(f"\n{passed}/{total} tests passed.")
+    if passed < total:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    run_tests()
+
+
+trainer.py:
+
+from __future__ import annotations
+
+import time
+import json
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from vit_model import ReceiptViT
+from field_vocab import FieldVocab, FIELDS, _DF_COL, normalize_label
+
+
+def _encode_batch(annotations, vocab):
+    encoded = {}
+
+    for field in FIELDS:
+        col = _DF_COL[field]
+        batch_idxs = [
+            torch.tensor(vocab.encode(field, ann.get(col, "") or ""), dtype=torch.long)
+            for ann in annotations
+        ]
+        encoded[field] = torch.stack(batch_idxs)
+
+    return encoded
+
+
+def _decoded_exact_match(logits, labels, annotations, vocab):
+    correct = {f: 0 for f in FIELDS}
+    n = len(annotations)
+
+    for field in FIELDS:
+        col = _DF_COL[field]
+        preds = logits[field].argmax(dim=-1).detach().cpu().tolist()
+
+        for pred_idx, ann in zip(preds, annotations):
+            pred_text = vocab.decode(field, pred_idx)
+            true_text = normalize_label(field, ann.get(col, "") or "")
+
+            if pred_text == true_text:
+                correct[field] += 1
+
+    return {f: correct[f] / n for f in FIELDS}
+
+
+def _run_epoch(
+    model, loader, optimizer, criterion, vocab, device, train, scheduler=None
+):
+    model.train(train)
+
+    total_loss = 0.0
+    field_correct = {f: 0.0 for f in FIELDS}
+    n_samples = 0
+
+    ctx = torch.enable_grad() if train else torch.no_grad()
+
+    with ctx:
+        for images, annotations in loader:
+            images = images.to(device, non_blocking=True)
+
+            labels = _encode_batch(annotations, vocab)
+            labels = {f: t.to(device, non_blocking=True) for f, t in labels.items()}
+
+            logits = model(images)
+
+            loss = sum(
+                criterion(logits[f].permute(0, 2, 1), labels[f]) for f in FIELDS
+            ) / len(FIELDS)
+
+            if train:
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+                if scheduler is not None:
+                    scheduler.step()
+
+            B = images.size(0)
+            total_loss += loss.item() * B
+            n_samples += B
+
+            batch_accs = _decoded_exact_match(logits, labels, annotations, vocab)
+            for f in FIELDS:
+                field_correct[f] += batch_accs[f] * B
+
+    avg_loss = total_loss / n_samples
+    accs = {f: field_correct[f] / n_samples for f in FIELDS}
+    overall = sum(accs.values()) / len(FIELDS)
+
+    return {"loss": avg_loss, "accs": accs, "overall_acc": overall}
+
+
+def train_model(
+    model: ReceiptViT,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    vocab: FieldVocab,
+    num_epochs: int = 20,
+    lr: float = 3e-5,
+    device_str: str = "cpu",
+    checkpoint_dir: str = "../Experiments/checkpoints",
+    warmup_epochs: int = 5,
+) -> dict[str, Any]:
+
+    device = torch.device(device_str)
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    # Do NOT ignore PAD.
+    # The model must learn when the field ends.
+    criterion = nn.CrossEntropyLoss()
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        steps_per_epoch=len(train_loader),
+        epochs=num_epochs,
+    )
+
+    ckpt_dir = Path(checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    best_ckpt = ckpt_dir / "best_model.pt"
+    hist_path = ckpt_dir / "history.json"
+    resl_path = ckpt_dir / "results.json"
+
+    best_val_acc = -1.0
+    history = []
+
+    header = (
+        f"{'Ep':>3}  {'TrLoss':>7}  "
+        + "  ".join(f"{'tr_' + f[:3]:>6}" for f in FIELDS)
+        + f"  {'VaLoss':>7}  "
+        + "  ".join(f"{'va_' + f[:3]:>6}" for f in FIELDS)
+        + f"  {'s':>4}"
+    )
+
+    print(header)
+    print("─" * len(header))
+
+    for epoch in range(1, num_epochs + 1):
+        t0 = time.time()
+
+        train_stats = _run_epoch(
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            vocab,
+            device,
+            train=True,
+            scheduler=scheduler,
+        )
+
+        val_stats = _run_epoch(
+            model, val_loader, None, criterion, vocab, device, train=False
+        )
+
+        elapsed = time.time() - t0
+
+        tr_accs = "  ".join(f"{train_stats['accs'][f]:6.3f}" for f in FIELDS)
+        va_accs = "  ".join(f"{val_stats['accs'][f]:6.3f}" for f in FIELDS)
+
+        print(
+            f"{epoch:3d}  {train_stats['loss']:7.4f}  {tr_accs}  "
+            f"{val_stats['loss']:7.4f}  {va_accs}  {elapsed:4.0f}s"
+        )
+
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_stats["loss"],
+                "train_acc": train_stats["overall_acc"],
+                "val_loss": val_stats["loss"],
+                "val_acc": val_stats["overall_acc"],
+                **{f"train_acc_{f}": train_stats["accs"][f] for f in FIELDS},
+                **{f"val_acc_{f}": val_stats["accs"][f] for f in FIELDS},
+            }
+        )
+
+        if val_stats["overall_acc"] > best_val_acc:
+            best_val_acc = val_stats["overall_acc"]
+            torch.save(model.state_dict(), best_ckpt)
+
+        with open(hist_path, "w") as f:
+            json.dump(history, f, indent=2)
+
+    model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    final = _run_epoch(model, val_loader, None, criterion, vocab, device, train=False)
+
+    results = {
+        "train_test_split": "80/10/10",
+        "overall_f1": round(final["overall_acc"], 4),
+    }
+
+    for f in FIELDS:
+        results[f"exact_match_{f}"] = round(final["accs"][f], 4)
+
+    with open(resl_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\n✓ Best val overall acc: {best_val_acc:.4f}  |  checkpoint: {best_ckpt}")
+
+    return results, history
+
+
+vit_model.py:
+
+import torch
+import torch.nn as nn
+
+
+class PatchEmbedding(nn.Module):
+    def __init__(
+        self,
+        image_size: int = 224,
+        patch_size: int = 16,
+        in_channels: int = 3,
+        embed_dim: int = 256,
+    ):
+        super().__init__()
+
+        assert (
+            image_size % patch_size == 0
+        ), f"image_size ({image_size}) must be divisible by patch_size ({patch_size})"
+
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_patches = (image_size // patch_size) ** 2
+
+        # Size of the raw flattened patch vector: P*P*C
+        patch_dim = patch_size * patch_size * in_channels
+
+        self.projection_weight = nn.Parameter(torch.empty(embed_dim, patch_dim))
+        self.projection_bias = nn.Parameter(torch.zeros(embed_dim))
+
+        nn.init.kaiming_uniform_(self.projection_weight, nonlinearity="linear")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+
+        assert H == self.image_size and W == self.image_size, (
+            f"Expected ({self.image_size}, {self.image_size}), got ({H}, {W}). "
+            "Make sure your DataLoader resizes images before passing them here."
+        )
+
+        P = self.patch_size
+        x = x.reshape(B, C, H // P, P, W // P, P)
+        x = x.permute(0, 2, 4, 3, 5, 1)
+        x = x.reshape(B, self.num_patches, -1)
+
+        patch_embeddings = x @ self.projection_weight.T + self.projection_bias
+
+        # (B, num_patches, embed_dim)
+        return patch_embeddings
+
+    def extra_repr(self) -> str:
+        return (
+            f"image_size={self.image_size}, patch_size={self.patch_size}, "
+            f"num_patches={self.num_patches}, "
+            f"embed_dim={self.projection_bias.shape[0]}"
+        )
+
+
+class LearnablePositionalEmbedding(nn.Module):
+    def __init__(self, num_patches: int, embed_dim: int):
+        super().__init__()
+
+        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+
+        # Normal initialisation with small std — standard practice for pos embeds
+        nn.init.normal_(self.position_embeddings, mean=0.0, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.position_embeddings
+
+    def extra_repr(self) -> str:
+        _, N, D = self.position_embeddings.shape
+        return f"num_patches={N}, embed_dim={D}"
+
+
+class PatchAndPositionEmbedding(nn.Module):
+    def __init__(
+        self,
+        image_size: int = 224,
+        patch_size: int = 16,
+        in_channels: int = 3,
+        embed_dim: int = 256,
+    ):
+        super().__init__()
+
+        self.patch_embedding = PatchEmbedding(
+            image_size=image_size,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            embed_dim=embed_dim,
+        )
+
+        self.positional_embedding = LearnablePositionalEmbedding(
+            num_patches=self.patch_embedding.num_patches,
+            embed_dim=embed_dim,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (B, N, D)
+        x = self.patch_embedding(x)
+        # (B, N, D)
+        x = self.positional_embedding(x)
+        return x
+
+    @property
+    def num_patches(self):
+        return self.patch_embedding.num_patches
+
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        assert (
+            embed_dim % num_heads == 0
+        ), f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.proj_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, D = x.shape
+
+        qkv = self.qkv_proj(x)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_dropout(attn)
+
+        x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, D)
+        x = self.proj_dropout(self.out_proj(x))
+        return x
+
+    def extra_repr(self) -> str:
+        embed_dim = self.num_heads * self.head_dim
+        return f"num_heads={self.num_heads}, head_dim={self.head_dim}, embed_dim={embed_dim}"
+
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self, embed_dim: int, mlp_ratio: int = 4, dropout: float = 0.0):
+        super().__init__()
+        hidden_dim = embed_dim * mlp_ratio
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+    def extra_repr(self) -> str:
+        return (
+            f"embed_dim={self.net[-2].out_features}, "
+            f"hidden_dim={self.net[0].out_features}"
+        )
+
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        mlp_ratio: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn = FeedForwardBlock(embed_dim, mlp_ratio, dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+
+class ViTEncoder(nn.Module):
+    def __init__(
+        self,
+        image_size: int = 224,
+        patch_size: int = 16,
+        in_channels: int = 3,
+        embed_dim: int = 256,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        mlp_ratio: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.embedding = PatchAndPositionEmbedding(
+            image_size, patch_size, in_channels, embed_dim
+        )
+        self.layers = nn.Sequential(
+            *[
+                TransformerEncoderLayer(embed_dim, num_heads, mlp_ratio, dropout)
+                for _ in range(num_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # store for extra_repr
+        self._num_layers = num_layers
+        self._num_heads = num_heads
+        self._embed_dim = embed_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.embedding(x)
+        x = self.layers(x)
+        x = self.norm(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_layers={self._num_layers}, num_heads={self._num_heads}, "
+            f"embed_dim={self._embed_dim}, num_patches={self.embedding.num_patches}"
+        )
+
+
+class CharFieldHead(nn.Module):
+    def __init__(self, embed_dim: int, field: str, dropout: float = 0.1):
+        super().__init__()
+        from field_vocab import MAX_LEN, CHAR_VOCAB_SIZE
+
+        self.max_len = MAX_LEN[field]
+        self.vocab_size = CHAR_VOCAB_SIZE
+
+        # Project each patch token, then attend over them per output position
+        self.query = nn.Parameter(torch.zeros(self.max_len, embed_dim))
+        nn.init.normal_(self.query, std=0.02)
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim, num_heads=4, dropout=dropout, batch_first=True
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.proj = nn.Linear(embed_dim, self.vocab_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, N, D) — patch tokens from encoder
+        B = x.size(0)
+        # (B, max_len, D)
+        q = self.query.unsqueeze(0).expand(B, -1, -1)
+        # (B, max_len, D)
+        out, _ = self.cross_attn(q, x, x)
+        out = self.norm(out)
+        out = self.dropout(out)
+        # (B, max_len, vocab_size)
+        return self.proj(out)
+
+
+class ReceiptViT(nn.Module):
+    FIELDS = ["vendor", "date", "total", "address"]
+
+    def __init__(
+        self,
+        vocab_sizes: dict,
+        image_size: int = 224,
+        patch_size: int = 16,
+        in_channels: int = 3,
+        embed_dim: int = 256,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        mlp_ratio: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.encoder = ViTEncoder(
+            image_size=image_size,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            embed_dim=embed_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+        )
+        self.heads = nn.ModuleDict(
+            {field: CharFieldHead(embed_dim, field, dropout) for field in self.FIELDS}
+        )
+
+    def forward(self, x: torch.Tensor) -> dict:
+        features = self.encoder(x)
+        return {field: self.heads[field](features) for field in self.FIELDS}
+
+backend/:
+
+main.py:
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+import model_loader
+from routers import upload, review
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    (
+        model_loader.model,
+        model_loader.vocab,
+        model_loader.temperatures,
+        model_loader.thresholds,
+    ) = model_loader.load_model()
+
+    # add src directory to sys.path to import local modules
+    import sys
+    from pathlib import Path
+
+    # resolves the absolute path to the src directory
+    sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+    from conf_scoring_class import ConfidenceScorer
+
+
+    model_loader.scorer = ConfidenceScorer(
+        model=model_loader.model,
+        vocab=model_loader.vocab,
+        device=model_loader.device,
+    )
+    print("[startup] ConfidenceScorer ready")
+    yield
+    print("[shutdown] Cleaning up")
+
+# initialize FastAPI with metadata for Swagger
+app = FastAPI(
+    title="Receipt Digitization API",
+    description="Transformer-based Vision Encoder for Automated Receipt Digitization",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# configure CORS and allow React to communicate with backed
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# register endpoint routers for code structure
+app.include_router(upload.router)
+app.include_router(review.router)
+
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Receipt Digitization API is running"}
+
+model_loader.py:
+
+from __future__ import annotations
+from src.data_setup import setup_all
+
+import json
+import sys
+import torch
+from pathlib import Path
+
+# Make src/ importable from the backend folder
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(REPO_ROOT / "src"))
+
+from vit_model import ReceiptViT
+from field_vocab import FieldVocab
+
+# Paths
+CKPT_PATH = REPO_ROOT / "Experiments" / "checkpoints" / "exp3" / "best_model.pt"
+VOCAB_PATH = REPO_ROOT / "Experiments" / "vocab.json"
+TEMPS_PATH = REPO_ROOT / "Experiments" / "temperatures.json"
+THRESH_PATH = REPO_ROOT / "Experiments" / "thresholds.json"
+QUEUE_PATH = REPO_ROOT / "Experiments" / "review_queue.json"
+
+IMAGE_SIZE = 224
+PATCH_SIZE = 16
+EMBED_DIM = 256
+
+# Device
+device = torch.device(
+    "mps"
+    if torch.backends.mps.is_available()
+    else "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+
+def load_model() -> tuple[ReceiptViT, FieldVocab, dict, dict]:
+    setup_all()
+    vocab = FieldVocab.load(VOCAB_PATH)
+
+    model = ReceiptViT(
+        vocab_sizes=vocab.vocab_sizes(),
+        image_size=IMAGE_SIZE,
+        patch_size=PATCH_SIZE,
+        in_channels=3,
+        embed_dim=EMBED_DIM,
+        num_layers=6,
+        num_heads=4,
+        dropout=0.1,
+    )
+    # load learned weights into model
+    state = torch.load(CKPT_PATH, map_location=device)
+    model.load_state_dict(state)
+    model.to(device)
+    model.eval()
+
+    # load calibration data for confidence scoring
+    with open(TEMPS_PATH) as f:
+        temperatures = json.load(f)
+    with open(THRESH_PATH) as f:
+        raw_thresh = json.load(f)
+
+    thresholds = raw_thresh
+
+    print(f"[model_loader] Model loaded on {device}")
+    print(f"[model_loader] Thresholds: {thresholds}")
+    return model, vocab, temperatures, thresholds
+
+
+# global shared state 
+model: ReceiptViT | None = None
+vocab: FieldVocab | None = None
+temperatures: dict | None = None
+thresholds: dict | None = None
+# populated by confidence score
+scorer: object | None = None
+
+schemas.py:
+
+from __future__ import annotations
+from typing import Optional
+from pydantic import BaseModel
+
+
+class FieldResult(BaseModel):
+    value: str
+    confidence: float
+    needs_review: bool
+
+
+class ReceiptResponse(BaseModel):
+    receipt_id: str
+    fields: dict[str, FieldResult]
+    auto_accepted: bool
+    message: str
+
+
+class CorrectionRequest(BaseModel):
+    corrections: dict[str, str]
+
+
+class CorrectionResponse(BaseModel):
+    receipt_id: str
+    status: str
+    corrections_applied: dict[str, str]
+
+
+class ReviewItem(BaseModel):
+    receipt_id: str
+    reviewed: bool
+    fields: dict[str, FieldResult]
+
+
+class ReviewListResponse(BaseModel):
+    total: int
+    items: list[ReviewItem]
+
+routers/:
+
+review.py:
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+
+import model_loader
+from schemas import (
+    CorrectionRequest,
+    CorrectionResponse,
+    FieldResult,
+    ReviewItem,
+    ReviewListResponse,
+)
+
+# path configuration
+# makes sure backend can access logic in src directory
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "src"))
+from review_queue import ReviewQueue
+
+# initialize router
+router = APIRouter(prefix="/review", tags=["review"])
+
+
+def _load_queue() -> ReviewQueue:
+    if not model_loader.QUEUE_PATH.exists():
+        return ReviewQueue(model_loader.thresholds)
+    return ReviewQueue.load(model_loader.QUEUE_PATH)
+
+
+def _queue_field_to_schema(fr) -> FieldResult:
+    return FieldResult(
+        value=fr.corrected_text if fr.corrected_text else fr.predicted_text,
+        confidence=fr.confidence,
+        needs_review=fr.needs_review,
+    )
+
+
+@router.get("/", response_model=ReviewListResponse)
+def get_review_queue():
+    queue = _load_queue()
+
+    items = [
+        ReviewItem(
+            receipt_id=r.receipt_id,
+            reviewed=r.reviewed,
+            fields={
+                fname: _queue_field_to_schema(fr) for fname, fr in r.fields.items()
+            },
+        )
+        for r in queue.pending_review
+    ]
+
+    return ReviewListResponse(total=len(items), items=items)
+
+
+@router.get("/{receipt_id}", response_model=ReviewItem)
+def get_receipt(receipt_id: str):
+    queue = _load_queue()
+
+    for r in queue.pending_review:
+        if r.receipt_id == receipt_id:
+            return ReviewItem(
+                receipt_id=r.receipt_id,
+                reviewed=r.reviewed,
+                fields={
+                    fname: _queue_field_to_schema(fr) for fname, fr in r.fields.items()
+                },
+            )
+
+    raise HTTPException(
+        status_code=404, detail=f"Receipt '{receipt_id}' not found in review queue."
+    )
+
+
+@router.post("/{receipt_id}", response_model=CorrectionResponse)
+def submit_correction(receipt_id: str, body: CorrectionRequest):
+    queue = _load_queue()
+    
+    result = queue.apply_correction(receipt_id, body.corrections)
+
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail=f"Receipt '{receipt_id}' not found in review queue."
+        )
+
+    # persist changes to disk immediately
+    queue.save(model_loader.QUEUE_PATH)
+
+    return CorrectionResponse(
+        receipt_id=receipt_id,
+        status="corrected",
+        corrections_applied=body.corrections,
+    )
+
+
+@router.get("/stats/summary")
+def get_review_stats():
+    queue = _load_queue()
+    summary = queue.summary()
+    return {
+        **summary,
+        "unreviewed": sum(1 for r in queue.pending_review if not r.reviewed),
+    }
+
+upload.py:
+
+"""
+upload.py — Step 5.2
+POST /upload  →  accept receipt image, run model, return fields + confidence scores
+"""
+
+from __future__ import annotations
+
+import io
+import uuid
+from pathlib import Path
+
+import torch
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from PIL import Image
+from torchvision import transforms
+
+import model_loader
+from schemas import FieldResult, ReceiptResponse
+
+# API route configuration
+router = APIRouter(prefix="/upload", tags=["upload"])
+
+# image pipeline: resize, convert to greyscale, and normalize
+TRANSFORM = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.Grayscale(num_output_channels=3),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+
+def _preprocess(image_bytes: bytes) -> torch.Tensor:
+    """Load image bytes → normalised (1, 3, 384, 384) tensor."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode image.")
+    return TRANSFORM(img).unsqueeze(0)          # (1, 3, 384, 384)
+
+
+def _run_inference(tensor: torch.Tensor) -> dict[str, FieldResult]:
+    """
+    Run the ViT model + temperature scaling on a single-image batch.
+    Returns a dict of FieldResult objects keyed by field name.
+    """
+    model        = model_loader.model
+    vocab        = model_loader.vocab
+    temperatures = model_loader.temperatures
+    thresholds   = model_loader.thresholds
+
+    tensor = tensor.to(model_loader.device)
+
+    # predict_with_confidence returns {field: {"label": [...], "confidence": [...]}}
+    with torch.no_grad():
+        results = model_loader.scorer.predict_with_confidence(tensor, temperatures)
+
+    field_results: dict[str, FieldResult] = {}
+    for fname, data in results.items():
+        value      = data["label"][0]
+        confidence = data["confidence"][0]
+        threshold  = thresholds.get(fname, 0.80)
+        field_results[fname] = FieldResult(
+            value=value,
+            confidence=round(confidence, 4),
+            needs_review=confidence < threshold,
+        )
+    return field_results
+
+
+@router.post("/", response_model=ReceiptResponse)
+async def upload_receipt(file: UploadFile = File(...)):
+    """
+    Upload a receipt image and get back extracted fields with confidence scores.
+
+    - **file**: JPEG or PNG receipt image
+    """
+    # validate file type, only allows images
+    if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{file.content_type}'. Send JPEG or PNG."
+        )
+
+    # ensure model is loaded into main.py
+    if model_loader.model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet.")
+
+    # process image and get prediction
+    image_bytes  = await file.read()
+    tensor       = _preprocess(image_bytes)
+    field_results = _run_inference(tensor)
+
+    auto_accepted = not any(f.needs_review for f in field_results.values())
+    receipt_id    = f"{Path(file.filename).stem}_{uuid.uuid4().hex[:8]}"
+
+    # save to JSON queue for the review endpoints
+    _save_to_queue(receipt_id, field_results, auto_accepted)
+
+    return ReceiptResponse(
+        receipt_id=receipt_id,
+        fields=field_results,
+        auto_accepted=auto_accepted,
+        message="Auto-accepted" if auto_accepted else "Flagged for manual review",
+    )
+
+
+def _save_to_queue(
+    receipt_id: str,
+    field_results: dict[str, "FieldResult"],
+    auto_accepted: bool,
+) -> None:
+    """Append this receipt to the on-disk review queue JSON."""
+    import json
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+
+    from review_queue import ReviewQueue
+    from review_queue import FieldResult as QueueField
+    from review_queue import ReceiptResult
+
+    queue_path = model_loader.QUEUE_PATH
+
+    if queue_path.exists():
+        queue = ReviewQueue.load(queue_path)
+    else:
+        queue = ReviewQueue(model_loader.thresholds)
+
+    result = ReceiptResult(receipt_id=receipt_id, auto_accepted=auto_accepted)
+
+    #convert API results to queue's storage format
+    from field_vocab import FIELDS
+    for fname in FIELDS:
+        fr = field_results.get(fname)
+        if fr:
+            result.fields[fname] = QueueField(
+                field_name=fname,
+                predicted_text=fr.value,
+                confidence=fr.confidence,
+                needs_review=fr.needs_review,
+            )
+
+    #sort into correct list based on confidence
+    if auto_accepted:
+        queue.auto_accepted.append(result)
+    else:
+        queue.pending_review.append(result)
+
+    queue.save(queue_path)
