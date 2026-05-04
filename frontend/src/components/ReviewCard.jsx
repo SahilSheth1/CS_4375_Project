@@ -3,9 +3,9 @@ import { AlertTriangle, Save, Loader2, ChevronDown, ChevronUp } from 'lucide-rea
 import FieldCard from './FieldCard'
 
 const FIELD_LABELS = {
-  vendor:  'Vendor',
-  date:    'Date',
-  total:   'Total',
+  vendor: 'Vendor',
+  date: 'Date',
+  total: 'Total',
   address: 'Address',
 }
 
@@ -14,10 +14,10 @@ export default function ReviewCard({ item, onSave }) {
     .filter(([, f]) => f.needs_review)
     .map(([name]) => name)
 
-  const [edits,    setEdits]    = useState(
+  const [edits, setEdits] = useState(
     Object.fromEntries(flaggedFields.map(f => [f, item.fields[f].value]))
   )
-  const [saving,   setSaving]   = useState(false)
+  const [saving, setSaving] = useState(false)
   const [expanded, setExpanded] = useState(true)
 
   const handleSave = async () => {
@@ -58,11 +58,10 @@ export default function ReviewCard({ item, onSave }) {
       {expanded && (
         <div className="p-4 space-y-4">
 
-          {/* All fields — flagged ones are editable */}
+          {/* All fields */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {Object.entries(item.fields).map(([field, data]) => (
               data.needs_review ? (
-                /* Editable flagged field */
                 <div key={field}
                   className="rounded-lg border p-3 space-y-2"
                   style={{ borderColor: '#FECACA', background: '#FFF7F7' }}>
@@ -82,18 +81,17 @@ export default function ReviewCard({ item, onSave }) {
                     className="w-full text-sm font-mono rounded-md px-3 py-1.5 border outline-none transition"
                     style={{
                       borderColor: '#FECACA',
-                      background:  '#FFFFFF',
-                      color:       '#1F2937',
+                      background: '#FFFFFF',
+                      color: '#1F2937',
                     }}
                     onFocus={e => e.target.style.borderColor = '#2F80ED'}
-                    onBlur={e  => e.target.style.borderColor = '#FECACA'}
+                    onBlur={e => e.target.style.borderColor = '#FECACA'}
                   />
                   <p className="text-xs" style={{ color: '#9CA3AF' }}>
                     Model predicted: <span className="font-mono">{data.value || '—'}</span>
                   </p>
                 </div>
               ) : (
-                /* Read-only accepted field */
                 <FieldCard
                   key={field}
                   label={FIELD_LABELS[field] ?? field}
@@ -113,7 +111,7 @@ export default function ReviewCard({ item, onSave }) {
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-all"
               style={{
                 background: saving ? '#93C5FD' : '#2F80ED',
-                cursor:     saving ? 'not-allowed' : 'pointer',
+                cursor: saving ? 'not-allowed' : 'pointer',
               }}
             >
               {saving

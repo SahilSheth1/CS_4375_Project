@@ -4,8 +4,8 @@ import UploadPage from './pages/UploadPage'
 import ReviewPage from './pages/ReviewPage'
 
 const NAV = [
-  { id: 'upload', label: 'Upload',  icon: Upload },
-  { id: 'review', label: 'Review',  icon: ClipboardCheck },
+  { id: 'upload', label: 'Upload', icon: Upload },
+  { id: 'review', label: 'Review', icon: ClipboardCheck },
 ]
 
 export default function App() {
@@ -45,7 +45,7 @@ export default function App() {
       </main>
 
       <footer className="py-4 text-center text-xs" style={{ color: '#9CA3AF' }}>
-        ReceiptAI · CS 4375 · ICDAR 2019 SROIE
+        ReceiptAI · CS 4375
       </footer>
     </div>
   )

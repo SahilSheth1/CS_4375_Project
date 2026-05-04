@@ -1,4 +1,3 @@
-// api.js — all calls to the FastAPI backend
 import axios from 'axios'
 
 const api = axios.create({

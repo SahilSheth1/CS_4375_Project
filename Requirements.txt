@@ -12,6 +12,3 @@ python-multipart
 pydantic
 opencv-python
 requests
-datasets
-notebook
-jupyter

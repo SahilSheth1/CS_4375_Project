@@ -8,11 +8,12 @@ import ReviewCard from '../components/ReviewCard'
 import StatsPill from '../components/StatsPill'
 
 export default function ReviewPage() {
-  const [items,   setItems]   = useState([])
-  const [stats,   setStats]   = useState(null)
+  const [items, setItems] = useState([])
+  const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState(null)
-  const [saved,   setSaved]   = useState({})   // { receipt_id: true } after correction
+  const [error, setError] = useState(null)
+  // { receipt_id: true } after correction
+  const [saved, setSaved] = useState({})
 
   const fetchQueue = useCallback(async () => {
     setLoading(true)
