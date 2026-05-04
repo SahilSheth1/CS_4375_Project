@@ -17,8 +17,10 @@ from torchvision import transforms
 import model_loader
 from schemas import FieldResult, ReceiptResponse
 
+# API route configuration
 router = APIRouter(prefix="/upload", tags=["upload"])
 
+# image pipeline: resize, convert to greyscale, and normalize
 TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.Grayscale(num_output_channels=3),
@@ -73,16 +75,18 @@ async def upload_receipt(file: UploadFile = File(...)):
 
     - **file**: JPEG or PNG receipt image
     """
-    # Validate file type
+    # validate file type, only allows images
     if file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
         raise HTTPException(
             status_code=415,
             detail=f"Unsupported file type '{file.content_type}'. Send JPEG or PNG."
         )
 
+    # ensure model is loaded into main.py
     if model_loader.model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet.")
 
+    # process image and get prediction
     image_bytes  = await file.read()
     tensor       = _preprocess(image_bytes)
     field_results = _run_inference(tensor)
@@ -90,7 +94,7 @@ async def upload_receipt(file: UploadFile = File(...)):
     auto_accepted = not any(f.needs_review for f in field_results.values())
     receipt_id    = f"{Path(file.filename).stem}_{uuid.uuid4().hex[:8]}"
 
-    # Persist to review queue on disk so /review endpoint can serve it
+    # save to JSON queue for the review endpoints
     _save_to_queue(receipt_id, field_results, auto_accepted)
 
     return ReceiptResponse(
@@ -125,6 +129,7 @@ def _save_to_queue(
 
     result = ReceiptResult(receipt_id=receipt_id, auto_accepted=auto_accepted)
 
+    #convert API results to queue's storage format
     from field_vocab import FIELDS
     for fname in FIELDS:
         fr = field_results.get(fname)
@@ -136,6 +141,7 @@ def _save_to_queue(
                 needs_review=fr.needs_review,
             )
 
+    #sort into correct list based on confidence
     if auto_accepted:
         queue.auto_accepted.append(result)
     else:

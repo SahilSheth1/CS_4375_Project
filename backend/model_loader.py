@@ -46,11 +46,13 @@ def load_model() -> tuple[ReceiptViT, FieldVocab, dict, dict]:
         num_heads=4,
         dropout=0.1,
     )
+    # load learned weights into model
     state = torch.load(CKPT_PATH, map_location=device)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
 
+    # load calibration data for confidence scoring
     with open(TEMPS_PATH) as f:
         temperatures = json.load(f)
     with open(THRESH_PATH) as f:
@@ -63,10 +65,10 @@ def load_model() -> tuple[ReceiptViT, FieldVocab, dict, dict]:
     return model, vocab, temperatures, thresholds
 
 
-# Shared state (populated at startup)
+# global shared state 
 model: ReceiptViT | None = None
 vocab: FieldVocab | None = None
 temperatures: dict | None = None
 thresholds: dict | None = None
-# ConfidenceScorer, typed as object to avoid circular import
+# populated by confidence score
 scorer: object | None = None

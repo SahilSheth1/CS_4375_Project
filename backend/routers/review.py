@@ -14,9 +14,12 @@ from schemas import (
     ReviewListResponse,
 )
 
+# path configuration
+# makes sure backend can access logic in src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "src"))
 from review_queue import ReviewQueue
 
+# initialize router
 router = APIRouter(prefix="/review", tags=["review"])
 
 
@@ -74,7 +77,7 @@ def get_receipt(receipt_id: str):
 @router.post("/{receipt_id}", response_model=CorrectionResponse)
 def submit_correction(receipt_id: str, body: CorrectionRequest):
     queue = _load_queue()
-
+    
     result = queue.apply_correction(receipt_id, body.corrections)
 
     if result is None:
@@ -82,6 +85,7 @@ def submit_correction(receipt_id: str, body: CorrectionRequest):
             status_code=404, detail=f"Receipt '{receipt_id}' not found in review queue."
         )
 
+    # persist changes to disk immediately
     queue.save(model_loader.QUEUE_PATH)
 
     return CorrectionResponse(
