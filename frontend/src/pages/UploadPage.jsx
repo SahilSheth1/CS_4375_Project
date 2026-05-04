@@ -7,9 +7,9 @@ import FieldCard from '../components/FieldCard'
 import StatusBadge from '../components/StatusBadge'
 
 const FIELD_LABELS = {
-  vendor:  'Vendor',
-  date:    'Date',
-  total:   'Total',
+  vendor: 'Vendor',
+  date: 'Date',
+  total: 'Total',
   address: 'Address',
 }
 
@@ -17,18 +17,19 @@ const FIELD_LABELS = {
 function sortedFields(fields) {
   return Object.entries(fields).sort(([, a], [, b]) => {
     if (a.needs_review && !b.needs_review) return -1
-    if (!a.needs_review && b.needs_review) return  1
-    return a.confidence - b.confidence   // lower confidence first within each group
+    if (!a.needs_review && b.needs_review) return 1
+    // lower confidence first within each group
+    return a.confidence - b.confidence
   })
 }
 
 function OverallConfidence({ fields }) {
-  const values   = Object.values(fields)
-  const avg      = values.reduce((s, f) => s + f.confidence, 0) / values.length
-  const pct      = Math.round(avg * 100)
-  const flagged  = values.filter(f => f.needs_review).length
-  const color    = flagged > 0 ? '#D97706' : '#0F766E'
-  const bgColor  = flagged > 0 ? '#FEF3C7' : '#CCFBF1'
+  const values = Object.values(fields)
+  const avg = values.reduce((s, f) => s + f.confidence, 0) / values.length
+  const pct = Math.round(avg * 100)
+  const flagged = values.filter(f => f.needs_review).length
+  const color = flagged > 0 ? '#D97706' : '#0F766E'
+  const bgColor = flagged > 0 ? '#FEF3C7' : '#CCFBF1'
 
   return (
     <div
@@ -58,12 +59,12 @@ function OverallConfidence({ fields }) {
 }
 
 export default function UploadPage() {
-  const [file,     setFile]     = useState(null)
-  const [preview,  setPreview]  = useState(null)
+  const [file, setFile] = useState(null)
+  const [preview, setPreview] = useState(null)
   const [dragging, setDragging] = useState(false)
-  const [loading,  setLoading]  = useState(false)
-  const [result,   setResult]   = useState(null)
-  const [error,    setError]    = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
   const inputRef = useRef()
 
   const handleFile = (f) => {
@@ -121,7 +122,7 @@ export default function UploadPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
-        {/* ── Left: drop zone ── */}
+        {/* Left: drop zone */}
         <div className="space-y-4">
           {!file ? (
             <div
@@ -132,7 +133,7 @@ export default function UploadPage() {
               className="cursor-pointer rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center gap-3 py-16 px-8 text-center"
               style={{
                 borderColor: dragging ? '#2F80ED' : '#D1D9E6',
-                background:  dragging ? '#EBF4FF' : '#FFFFFF',
+                background: dragging ? '#EBF4FF' : '#FFFFFF',
               }}
             >
               <div
@@ -200,7 +201,7 @@ export default function UploadPage() {
             className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium text-white transition-all"
             style={{
               background: !file || loading ? '#93C5FD' : '#2F80ED',
-              cursor:     !file || loading ? 'not-allowed' : 'pointer',
+              cursor: !file || loading ? 'not-allowed' : 'pointer',
             }}
           >
             {loading
@@ -210,7 +211,7 @@ export default function UploadPage() {
           </button>
         </div>
 
-        {/* ── Right: results ── */}
+        {/* Right: results */}
         <div className="space-y-3">
 
           {/* Empty state */}
@@ -259,7 +260,7 @@ export default function UploadPage() {
                 <OverallConfidence fields={result.fields} />
               </div>
 
-              {/* Field cards — flagged fields sorted to top */}
+              {/* Field cards */}
               {sortedFields(result.fields).map(([field, data], i) => (
                 <FieldCard
                   key={field}
