@@ -1,18 +1,3 @@
-"""
-Dataset setup helper for the receipt understanding project.
-
-Put this file at:
-
-    CS_4375_Project/src/data_setup.py
-
-Recommended:
-    Upload one public zip containing:
-        sroie-receipt-dataset/
-        CORD/
-        wildreceipt/
-
-    Then paste the direct public URL below.
-"""
 
 from __future__ import annotations
 
@@ -32,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #   sroie-receipt-dataset/
 #   CORD/
 #   wildreceipt/
+
+# Manraj recommend - zip up all datasets so we can easily add more in the future. 
 PUBLIC_DATA_BUNDLE_URL = "PASTE_YOUR_PUBLIC_DATA_BUNDLE_ZIP_URL_HERE"
 
 WILDRECEIPT_URL = "https://download.openmmlab.com/mmocr/data/wildreceipt.tar"
@@ -67,7 +54,6 @@ def _extract_zip(zip_path: Path, extract_to: Path) -> None:
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_to)
 
-
 def _extract_tar(tar_path: Path, extract_to: Path) -> None:
     print(f"Extracting tar: {tar_path}")
     with tarfile.open(tar_path, "r:*") as tf:
@@ -82,13 +68,9 @@ def _exists_wildreceipt() -> bool:
     root = REPO_ROOT / "wildreceipt"
     return (root / "train.txt").exists() and (root / "test.txt").exists()
 
-
+# Helpful later on in FasstAPI setup ****** 
 def setup_public_bundle() -> bool:
-    """
-    Downloads a public project data bundle if PUBLIC_DATA_BUNDLE_URL is set.
 
-    Returns True if a bundle was downloaded/extracted or already appears present.
-    """
     url = PUBLIC_DATA_BUNDLE_URL.strip()
 
     if not url or "PASTE_YOUR_PUBLIC_DATA_BUNDLE_ZIP_URL_HERE" in url:
@@ -107,9 +89,6 @@ def setup_public_bundle() -> bool:
 
 
 def setup_wildreceipt() -> None:
-    """
-    Downloads WildReceipt from the public OpenMMLab tar if it is missing.
-    """
     if _exists_wildreceipt():
         print("WildReceipt already exists.")
         return
@@ -120,19 +99,15 @@ def setup_wildreceipt() -> None:
 
     if not _exists_wildreceipt():
         print(
-            "WildReceipt extracted, but the expected train.txt/test.txt files "
+            "Error: WildReceipt extracted, but the expected train.txt/test.txt files "
             "were not found directly under CS_4375_Project/wildreceipt/. "
             "Check the extracted folder and rename/move it to wildreceipt/ if needed."
         )
     else:
         print("WildReceipt ready.")
 
-
+# Resort to this if HuggingFace is not working 
 def check_sroie() -> None:
-    """
-    SROIE is usually hosted behind official challenge/download pages.
-    For the cleanest TA setup, include it in the public project data bundle.
-    """
     if _exists_sroie():
         print("SROIE found.")
         return
@@ -147,9 +122,6 @@ def check_sroie() -> None:
 
 
 def setup_all() -> None:
-    """
-    Main setup entrypoint.
-    """
     used_bundle = setup_public_bundle()
 
     if not used_bundle:

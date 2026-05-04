@@ -20,8 +20,8 @@ def run_tests() -> None:
             passed += 1
         print(f"  [{status}] {label}")
 
-    # MHSA shape tests
-    print("\n--- MHSA shape tests ---")
+    #
+    print("\n \tMHSA shape tests \t")
     x_196 = torch.randn(2, 196, 256)
 
     mhsa4 = MultiHeadSelfAttention(embed_dim=256, num_heads=4)
@@ -39,23 +39,20 @@ def run_tests() -> None:
         raised = True
     check("MHSA invalid heads raises", raised)
 
-    # FFN shape tests
-    print("\n--- FFN shape tests ---")
+    print("\n \t FFN shape tests \t")
     ffn = FeedForwardBlock(embed_dim=256, mlp_ratio=4)
     out = ffn(x_196)
     check("FFN output shape", out.shape == (2, 196, 256))
 
-    # TransformerEncoderLayer shape tests
-    print("\n--- TransformerEncoderLayer shape tests ---")
+
+    print("\n\t TransformerEncoderLayer shape tests \t")
     layer = TransformerEncoderLayer(embed_dim=256, num_heads=4)
     out = layer(x_196)
     check("EncoderLayer output shape", out.shape == (2, 196, 256))
-
-    # ViTEncoder end-to-end tests
-    print("\n--- ViTEncoder end-to-end tests ---")
+    print("\n\t ViTEncoder end-to-end tests \t")
     img = torch.randn(2, 3, 224, 224)
 
-    # Exp2
+    # Expperiment 2 config
     enc2 = ViTEncoder(
         image_size=224,
         patch_size=16,
@@ -67,7 +64,7 @@ def run_tests() -> None:
     out2 = enc2(img)
     check("ViTEncoder Exp2 shape", out2.shape == (2, 196, 256))
 
-    # Exp3
+    # Experiment 3 config 
     enc3 = ViTEncoder(
         image_size=224,
         patch_size=16,
@@ -79,7 +76,7 @@ def run_tests() -> None:
     out3 = enc3(img)
     check("ViTEncoder Exp3 shape", out3.shape == (2, 196, 256))
 
-    # Deterministic in eval mode
+    # Where the evaluation method needs to be declared outisde of the model.ipynb file
     enc2.eval()
     with torch.no_grad():
         a = enc2(img)
@@ -102,8 +99,8 @@ def run_tests() -> None:
         d = enc_drop(img)
     check("ViTEncoder dropout active in train", not torch.equal(c, d))
 
-    # Parameter count sanity
-    print("\n--- Parameter count sanity ---")
+    # Taking redundnat measures 
+    print("\n \tParameter count (for redundancy) \t")
     enc2_fresh = ViTEncoder(
         image_size=224,
         patch_size=16,

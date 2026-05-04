@@ -4,8 +4,6 @@ import json
 import pytesseract
 from PIL import Image
 
-# TESSERACT OCR
-
 
 def run_ocr(image_path: str) -> str:
     image = Image.open(image_path).convert("RGB")
@@ -14,23 +12,17 @@ def run_ocr(image_path: str) -> str:
     return raw_text
 
 
-# REGEX FIELD EXTRACTION
-
 
 def extract_fields(raw_text: str) -> dict:
     lines = [l.strip() for l in raw_text.strip().splitlines() if l.strip()]
 
     extracted = {"company": "", "date": "", "address": "", "total": ""}
 
-    # Heuristic: company name is typically the first non-empty line,
-    # short, often all-caps, at the top of the receipt
+   #Invutively company name will be the first line on the receipt 
     if lines:
         extracted["company"] = lines[0]
 
-    # Matches common formats found on Malaysian receipts in SROIE:
-    #   DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
-    #   YYYY/MM/DD, YYYY-MM-DD
-    #   DD MON YYYY (e.g. 12 JAN 2018)
+    #   Setting all dates to DD/MM/YYYY format for the vocab 
     date_pattern = re.compile(
         r"""
         \b(
@@ -49,7 +41,8 @@ def extract_fields(raw_text: str) -> dict:
     if date_match:
         extracted["date"] = date_match.group(0).strip()
 
-    # Look for keyword (TOTAL, AMOUNT, etc.) followed by a currency amount
+
+    # SInce our dataset is mostly english - just look for common total price keywords
     total_pattern = re.compile(
         r"""
         (?:TOTAL|GRAND\s*TOTAL|AMOUNT\s*DUE|AMOUNT|CASH|BALANCE)
@@ -65,7 +58,7 @@ def extract_fields(raw_text: str) -> dict:
         amount = total_match.group(2)
         extracted["total"] = (currency + amount).strip()
 
-    # Look for lines containing street keywords or postal codes appearing after the company line and before the date/total
+    # In laymens term: looking for lines that contain common address strings 
     address_keywords = re.compile(
         r"\b(JALAN|JLN|LORONG|LRG|STREET|ST|AVENUE|AVE|ROAD|RD|"
         r"TAMAN|BANDAR|NO\.|BLOCK|BLK|FLOOR|LEVEL|MALL|PLAZA|"
@@ -83,18 +76,11 @@ def extract_fields(raw_text: str) -> dict:
     return extracted
 
 
-# NORMALIZATION
-
-
 def normalize(value: str) -> str:
     value = value.lower().strip()
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"[^\w\s\.\,\/\-]", "", value)
     return value
-
-
-# TOKEN-LEVEL F1
-
 
 def token_f1(prediction: str, ground_truth: str) -> float:
     pred_tokens = normalize(prediction).split()
@@ -122,10 +108,7 @@ def token_f1(prediction: str, ground_truth: str) -> float:
         return 0.0
     return 2 * precision * recall / (precision + recall)
 
-
-# EVALUATION
-
-
+# Submitting to all the fields for F1 scores with the average in all 4 fields.
 def evaluate(predictions: list, ground_truths: list) -> dict:
     fields = ["company", "date", "address", "total"]
     results = {}
